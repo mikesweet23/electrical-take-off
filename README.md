@@ -19,4 +19,9 @@ take-off counts cable, containment, fittings, fixings, isolators, glands
 (BW/CW/EMC with shrouds and earth tags) and flexible conduit. **3D** shows it
 all at height; **PDF** and **Excel** export the schedules and take-off.
 
+Editing: drag a box to pick several items, Shift-click to add one, drag to
+move them together; Ctrl+C / Ctrl+V / Ctrl+D copy, paste and duplicate (cables
+come with the loads). Rotate a sheet with ⟳ in the zoom bar or `[` / `]` —
+everything traced turns with it.
+
 Design notes and the data basis: [CLAUDE.md](CLAUDE.md).

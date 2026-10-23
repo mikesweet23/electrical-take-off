@@ -20,6 +20,7 @@ changing anything.
 | `engine.js` | Every electrical number: Appendix 4 tables, correction factors, devices, Zs, adiabatic, volt drop, isolators, glands, containment fill, support kits. `sizeCircuit()` and `sizeControl()` | No |
 | `core.js` | The project model, the containment network, cable routing, grouping, `solve()` and `takeoff()` | No |
 | `app.js` | Sheets, drawings (pdf.js), zoom, tools, tracing, the plan overlay, the inspector, settings, save/open/autosave, undo | Yes |
+| `edit.js` | Rotating a sheet, multi-select (lasso, Shift-click, Ctrl+A, group move, bulk edit) and copy / paste / duplicate | Yes |
 | `outputs.js` | Schedules drawer, 3D view, PDF report, Excel export. All four read the same `*Rows()` builders | Yes |
 | `xlsx.js` | A minimal .xlsx writer (stored zip, inline strings) | No |
 | `tests/*.mjs` | Node checks of the engine, model, take-off and xlsx writer | — |
@@ -128,6 +129,22 @@ settings merged over defaults, and the id counter moved past every id in use.
 - **Undo** is snapshots of the take-off without drawing images. `pushUndo()`
   goes before the change.
 - Refs (`DB1/3`) are automatic until typed (`refAuto: false`).
+- **Rotating a sheet bakes the turn into the image** and turns every traced
+  point on that sheet with it (nodes, run points, free cable waypoints, tape)
+  about the sheet centre, landing on the new canvas centre. Each turn is drawn
+  from the image as first loaded (`V.orig`), never the last rotated copy.
+  `sheet.rot` is the angle; `V.baked` the angle the current image carries, so
+  an undo re-renders the image when the two differ (`ensureBaked()`). The scale
+  is untouched — rotation keeps distances.
+- **Select tool:** drag on open paper lassos (runs come only when wholly
+  inside), Shift-click toggles one, a press on a picked item drags the group.
+  Pan is Space-drag, middle or right drag. A group move shifts unjoined run
+  points — joined points follow what they are joined to.
+- **Clipboard** is in `localStorage` in metres about the copy's centre, so it
+  pastes at true size on a sheet at another scale and survives a reload.
+  Joints inside the copy are kept, joints to anything left behind are let go.
+  A cable comes along when its load (and isolator) is copied; if its board
+  was not, the copy is fed from the same board and its supply auto-routes.
 
 ## 6. Checking a change
 

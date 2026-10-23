@@ -80,6 +80,7 @@ function undo() {
   if (V.sel && !selObject()) V.sel = null;
   showSheet();
   changed();
+  ensureBaked();
 }
 
 // ------------------------------------------------------------------
@@ -409,11 +410,12 @@ function render() {
   const selC = V.sel && V.sel.kind === 'circ' ? V.sel.id : null;
   const selR = V.sel && V.sel.kind === 'route' ? V.sel.id : null;
   const selN = V.sel && V.sel.kind === 'node' ? V.sel.id : null;
+  const multi = V.sel && V.sel.kind === 'multi' ? V.sel : null;
 
   // measures
   P.measures.filter(m => m.sheet === s.id).forEach(m => {
     const d = m.pts.map((q, i) => (i ? 'L' : 'M') + q.x.toFixed(1) + ' ' + q.y.toFixed(1)).join('');
-    const sel = V.sel && V.sel.kind === 'measure' && V.sel.id === m.id;
+    const sel = (V.sel && V.sel.kind === 'measure' && V.sel.id === m.id) || (multi && multi.measures.includes(m.id));
     out.push('<path d="' + d + '" fill="none" stroke="#e0a422" stroke-width="' + px(sel ? 3 : 2) + '" stroke-dasharray="' + px(8) + ' ' + px(5) + '"/>');
     const last = m.pts[m.pts.length - 1];
     if (last) out.push('<text x="' + (last.x + px(6)) + '" y="' + (last.y - px(6)) + '" font-size="' + px(12) + '" font-weight="700" fill="#8a5d00" stroke-width="' + px(3) + '">' + fmt(measureLen(m), 2) + ' m</text>');
@@ -429,6 +431,7 @@ function render() {
     const col = ROUTE_COLS[r.type] || '#777';
     const d = pts.map((q, i) => (i ? 'L' : 'M') + q.x.toFixed(1) + ' ' + q.y.toFixed(1)).join('');
     const bad = res.ok === false;
+    if (multi && multi.routes.includes(r.id)) out.push('<path d="' + d + '" fill="none" stroke="#e0a422" stroke-opacity="0.35" stroke-width="' + (wpx + px(10)) + '"/>');
     out.push('<path d="' + d + '" fill="none" stroke="' + (bad ? '#e57368' : col) + '" stroke-opacity="' + (r.type === 'cleats' ? 0.12 : 0.22) + '" stroke-width="' + wpx + '" stroke-linejoin="miter" stroke-linecap="butt"/>');
     // edges of the band
     if (wpx > px(5)) {
@@ -538,7 +541,11 @@ function render() {
   });
 
   // equipment
-  P.nodes.filter(n => n.sheet === s.id).forEach(n => out.push(nodeSvg(n, px, selN === n.id)));
+  P.nodes.filter(n => n.sheet === s.id).forEach(n => out.push(nodeSvg(n, px, selN === n.id || !!(multi && multi.nodes.includes(n.id)))));
+  if (V.drag && V.drag.kind === 'lasso') {
+    const d = V.drag;
+    out.push('<rect x="' + Math.min(d.a.x, d.b.x) + '" y="' + Math.min(d.a.y, d.b.y) + '" width="' + Math.abs(d.b.x - d.a.x) + '" height="' + Math.abs(d.b.y - d.a.y) + '" fill="rgba(224,164,34,.08)" stroke="#e0a422" stroke-width="' + px(1.5) + '" stroke-dasharray="' + px(6) + ' ' + px(4) + '"/>');
+  }
 
   // draft
   if (V.draft) out.push(draftSvg(px));
@@ -699,7 +706,7 @@ function buildRail() {
   el('rail').innerHTML = TOOLS.map(t => t === '-' ? '<hr>' : '<button class="tool" data-tool="' + t[0] + '" title="' + t[2] + ' (' + t[1] + ')"><svg viewBox="0 0 24 24">' + t[3] + '</svg><i>' + t[2] + '</i></button>').join('');
 }
 const HINTS = {
-  select: 'Click to select and edit. Drag equipment or a route point to move it. Drag empty paper to pan. <kbd>Del</kbd> deletes.',
+  select: 'Click to select and edit. Drag on open paper to lasso several; Shift-click adds one. <kbd>Ctrl+C</kbd> / <kbd>Ctrl+V</kbd> copy and paste. Space-drag to pan.',
   scale: 'Click both ends of a dimension you know.',
   board: 'Click to place a board — consumer unit, DB, MCC, BMS or control panel.',
   load: 'Click to place a load. Pick its kind above; enter kW or amps in the panel.',
@@ -1057,6 +1064,7 @@ function selObject() {
   if (s.kind === 'route') return routeById(s.id);
   if (s.kind === 'circ') return circById(s.id);
   if (s.kind === 'measure') return P.measures.find(m => m.id === s.id);
+  if (s.kind === 'multi') return s;
   return null;
 }
 function select(kind, id, extra) {
@@ -1082,18 +1090,10 @@ function selectAt(p) {
 function deleteSelected() {
   const s = V.sel;
   if (!s) { toast('Select something to delete'); return; }
+  if (s.kind === 'multi') { deleteMulti(s); return; }
   pushUndo();
   if (s.kind === 'node') {
-    const n = nodeById(s.id);
-    P.nodes = P.nodes.filter(x => x.id !== s.id);
-    P.circuits = P.circuits.filter(c => c.target !== s.id && !(c.board === s.id && c.kind !== 'power'));
-    P.circuits.forEach(c => {
-      if (c.board === s.id) c.board = null;
-      if (c.iso === s.id) { c.iso = null; if (c.legs.tail) { c.legs.main = c.legs.main || {}; delete c.legs.tail; } }
-      Object.values(c.legs || {}).forEach(l => { if (l.way) l.way = l.way.filter(w => w.r !== s.id); });
-    });
-    P.circuits = P.circuits.filter(c => c.board || c.iso || c.target);
-    if (n && n.kind === 'riser') P.routes.forEach(r => r.pts.forEach(pt => { if (pt.link === 'n:' + n.id) { pt.x = n.x; pt.y = n.y; delete pt.link; } }));
+    removeNode(s.id);
   } else if (s.kind === 'route') {
     const r = routeById(s.id);
     if (s.pt != null && r.pts.length > 2) {
@@ -1112,6 +1112,18 @@ function deleteSelected() {
   }
   V.sel = null;
   changed();
+}
+function removeNode(id) {
+  const n = nodeById(id);
+  P.nodes = P.nodes.filter(x => x.id !== id);
+  P.circuits = P.circuits.filter(c => c.target !== id && !(c.board === id && c.kind !== 'power'));
+  P.circuits.forEach(c => {
+    if (c.board === id) c.board = null;
+    if (c.iso === id) { c.iso = null; if (c.legs.tail) { c.legs.main = c.legs.main || {}; delete c.legs.tail; } }
+    Object.values(c.legs || {}).forEach(l => { if (l.way) l.way = l.way.filter(w => w.r !== id); });
+  });
+  P.circuits = P.circuits.filter(c => c.board || c.iso || c.target);
+  if (n && n.kind === 'riser') P.routes.forEach(r => r.pts.forEach(pt => { if (pt.link === 'n:' + n.id) { pt.x = n.x; pt.y = n.y; delete pt.link; } }));
 }
 // a point is going: anything joined to it keeps its place, cables keep a free waypoint
 function unrefPoint(pid) {
@@ -1132,13 +1144,7 @@ function onDown(ev) {
   if (ev.button !== 0) return;
   const p = toDwg(ev);
   const t = V.tool;
-  if (t === 'select') {
-    const hit = selectAt(p);
-    if (hit && hit.kind === 'node') { V.drag = { kind: 'node', id: hit.n.id, start: p, moved: false, ox: hit.n.x, oy: hit.n.y }; }
-    else if (hit && hit.kind === 'routept') { V.drag = { kind: 'pt', rid: V.sel.id, i: hit.rp.i, start: p, moved: false }; }
-    else if (!hit) { select(null); beginPan(ev); }
-    return;
-  }
+  if (t === 'select') { selectDown(ev, p); return; }
   if (t === 'board' || t === 'load' || t === 'isolator' || t === 'device' || t === 'riser') { addNode(t, p); return; }
   if (t === 'contain') { containClick(p); return; }
   if (t === 'cable') { cableClick(p); return; }
@@ -1154,11 +1160,15 @@ function onMove(ev) {
   }
   if (!sheet()) return;
   const p = toDwg(ev);
+  V.lastCursor = p;
+  if (V.drag && V.drag.kind === 'lasso') { V.drag.b = p; scheduleRender(); return; }
   if (V.drag) {
     const dx = p.x - V.drag.start.x, dy = p.y - V.drag.start.y;
     if (!V.drag.moved && Math.hypot(dx, dy) * V.zoom < 3) return;
     if (!V.drag.moved) { pushUndo(); V.drag.moved = true; }
-    if (V.drag.kind === 'node') {
+    if (V.drag.kind === 'group') {
+      dragGroup(dx, dy);
+    } else if (V.drag.kind === 'node') {
       const n = nodeById(V.drag.id);
       n.x = V.drag.ox + dx; n.y = V.drag.oy + dy;
     } else if (V.drag.kind === 'pt') {
@@ -1193,6 +1203,13 @@ function onMove(ev) {
 }
 function onUp() {
   if (V.pan) { V.pan = null; el('scroller').classList.remove('panning'); }
+  if (V.drag && V.drag.kind === 'lasso') {
+    const d = V.drag;
+    V.drag = null;
+    if (Math.hypot(d.b.x - d.a.x, d.b.y - d.a.y) * V.zoom > 4) selectInBox(d.a, d.b, d.add);
+    scheduleRender();
+    return;
+  }
   if (V.drag) {
     const moved = V.drag.moved;
     V.drag = null;
@@ -1231,6 +1248,7 @@ function renderInspector() {
   if (k === 'node') h = nodeForm(o);
   else if (k === 'route') h = routeForm(o);
   else if (k === 'circ') h = circForm(o);
+  else if (k === 'multi') h = multiForm(o);
   else if (k === 'measure') h = '<div class="insp-hd"><div><div class="kind">Tape</div><h3>' + fmt(measureLen(o), 2) + ' m</h3></div><button class="btn ghost sm" data-act="close">✕</button></div><div class="insp-bd"><p class="note">A plan measurement only — not counted in the take-off.</p><div class="insp-actions"><button class="btn danger sm" data-act="delete">Delete</button></div></div>';
   box.innerHTML = h;
 }
@@ -1468,6 +1486,7 @@ function onInspectorChange(ev) {
   const s = V.sel;
   const obj = selObject();
   if (!obj) return;
+  if (o === 'multi') { applyMulti(k, v); return; }
   pushUndo();
   if (o === 'node' || o === 'route' || o === 'circ') {
     if (v == null) delete obj[k]; else obj[k] = v;
@@ -1504,6 +1523,8 @@ function onInspectorClick(ev) {
   const act = a.dataset.act;
   const o = selObject();
   if (act === 'close') { select(null); return; }
+  if (act === 'dup') { duplicateSelection(); return; }
+  if (act === 'copy') { copySelection(); return; }
   if (act === 'delete') { deleteSelected(); return; }
   if (act === 'deleteRoute') { V.sel = { kind: 'route', id: V.sel.id }; deleteSelected(); return; }
   if (act === 'step') {
@@ -1681,7 +1702,10 @@ function helpDialog() {
     + [['V', 'Select'], ['S', 'Scale'], ['B / L / I / D / R', 'Board, load, isolator, field device, riser'], ['T', 'Trace containment'], ['C', 'Trace a cable'], ['M', 'Tape measure'],
       ['[ and ]', 'Height of the next point −/+ 0.1 m (Shift: 0.5 m)'], ['Alt (hold)', 'Free angle for one click'], ['O', 'Square corners on / off'],
       ['Enter / double-click', 'Finish the run'], ['Backspace', 'Take back the last point'], ['Esc', 'Cancel / put the tool down'],
-      ['Del', 'Delete the selection (or a selected route point)'], ['Ctrl+Z', 'Undo'], ['Ctrl+S', 'Save'], ['F', 'Fit the sheet'], ['Space + drag, middle drag', 'Pan'], ['Wheel', 'Zoom']]
+      ['Drag on open paper', 'Lasso — pick everything inside the box'], ['Shift-click', 'Add or remove one item'], ['Ctrl+A', 'Pick everything on the sheet'],
+      ['Ctrl+C / Ctrl+V', 'Copy / paste at the cursor (works across sheets and after a reload)'], ['Ctrl+D', 'Duplicate beside the original'], ['Arrow keys', 'Nudge the selection 50 mm (Shift 500 mm)'],
+      ['[ and ] (not tracing)', 'Rotate the drawing a quarter turn — ⟳ in the zoom bar for fine angles'],
+      ['Del', 'Delete the selection (or a selected route point)'], ['Ctrl+Z', 'Undo'], ['Ctrl+S', 'Save'], ['F', 'Fit the sheet'], ['Space + drag, middle or right drag', 'Pan'], ['Wheel', 'Zoom']]
       .map(k => '<tr><td>' + esc(k[0]) + '</td><td>' + esc(k[1]) + '</td></tr>').join('') + '</table>';
   modal('How to use Cable Trace', h, [['Close', () => true, 'go']], true);
 }
@@ -1716,6 +1740,8 @@ function saveProject() {
 function loadProject(data) {
   if (!data || data.app !== 'adi-cable-trace') { toast('That is not a Cable Trace project file'); return; }
   P = C.repair(data);
+  V.orig = {}; V.baked = {};
+  el('dwg').setAttribute('data-sheet', '');
   V.undo = []; el('bUndo').disabled = true;
   V.sel = null; V.draft = null;
   showSheet(); zoomFit(); changed(); setTool('select');
@@ -1791,6 +1817,7 @@ function wire() {
   el('zIn').onclick = () => setZoom(V.zoom * 1.25);
   el('zOut').onclick = () => setZoom(V.zoom / 1.25);
   el('zFit').onclick = zoomFit;
+  el('zRot').onclick = () => rotateDialog();
   el('zLbl').onclick = () => { V.labels = (V.labels + 2) % 3; scheduleRender(); toast(['Labels off', 'Names only', 'All labels'][V.labels]); };
   el('zStack').onclick = () => { V.stackIx = (V.stackIx + 1) % STACK_STEPS.length; el('zStack').textContent = STACK_STEPS[V.stackIx] === 1 ? '1:1' : '×' + STACK_STEPS[V.stackIx]; el('zStack').classList.toggle('on', V.stackIx > 0); scheduleRender(); toast(V.stackIx ? 'Cables drawn ×' + STACK_STEPS[V.stackIx] + ' their diameter, to read the stacking' : 'Cables at true diameter'); };
 
@@ -1856,6 +1883,13 @@ function onKey(ev) {
   if (ev.key === 'Alt') { V.alt = true; syncHint(); ev.preventDefault(); }
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 's') { ev.preventDefault(); saveProject(); return; }
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !typing) { ev.preventDefault(); undo(); return; }
+  if ((ev.ctrlKey || ev.metaKey) && !typing && !el('modalBg').classList.contains('on')) {
+    const kk = ev.key.toLowerCase();
+    if (kk === 'c') { ev.preventDefault(); copySelection(); return; }
+    if (kk === 'v') { ev.preventDefault(); pasteClipboard(); return; }
+    if (kk === 'd') { ev.preventDefault(); duplicateSelection(); return; }
+    if (kk === 'a') { ev.preventDefault(); if (sheet()) { setTool('select'); selectAll(); } return; }
+  }
   if (typing) { if (ev.key === 'Escape') ev.target.blur(); return; }
   if (el('modalBg').classList.contains('on')) { if (ev.key === 'Escape') closeModal(); return; }
   if (ev.key === ' ') { V.space = true; ev.preventDefault(); return; }
@@ -1877,6 +1911,14 @@ function onKey(ev) {
   if (ev.key === 'Delete' || ev.key === 'Backspace') { deleteSelected(); return; }
   if (ev.key === '[' || ev.key === ']') {
     if (V.tool === 'contain' || V.tool === 'cable') { setTraceH(V.traceH + (ev.key === ']' ? 1 : -1) * (ev.shiftKey ? 0.5 : 0.1)); toast('Next point at ' + fmt(V.traceH, 2) + ' m', 1200); scheduleRender(); }
+    else if (sheet()) rotateSheet(ev.key === ']' ? 90 : -90);
+    return;
+  }
+  if (ev.key.startsWith('Arrow') && V.sel && V.sel.kind !== 'circ' && V.tool === 'select') {
+    ev.preventDefault();
+    const step = ppm() * (ev.shiftKey ? 0.5 : 0.05);
+    const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[ev.key];
+    nudgeSelection(d[0], d[1]);
     return;
   }
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
