@@ -58,7 +58,7 @@ const ROUTE_COLS = { tray: '#6b7380', ladder: '#4a5d6e', basket: '#8a9a9b', trun
 // ------------------------------------------------------------------
 function snapshot() {
   return JSON.stringify({
-    nodes: P.nodes, routes: P.routes, circuits: P.circuits, measures: P.measures, settings: P.settings,
+    nodes: P.nodes, routes: P.routes, circuits: P.circuits, measures: P.measures, firewalls: P.firewalls, settings: P.settings,
     sheets: P.sheets.map(s => Object.assign({}, s, { src: undefined })), active: P.active, nextId: P.nextId,
     name: P.name, ref: P.ref, client: P.client
   });
@@ -385,6 +385,14 @@ function hitCable(p) {
   });
   return best;
 }
+function hitFire(p) {
+  const tol = 6 / V.zoom;
+  for (const f of (P.firewalls || [])) {
+    if (f.sheet !== P.active) continue;
+    for (let i = 1; i < f.pts.length; i++) if (distSeg(p, f.pts[i - 1], f.pts[i]).d < tol) return f;
+  }
+  return null;
+}
 function hitMeasure(p) {
   const tol = 6 / V.zoom;
   for (const m of P.measures) {
@@ -421,6 +429,19 @@ function render() {
     if (last) out.push('<text x="' + (last.x + px(6)) + '" y="' + (last.y - px(6)) + '" font-size="' + px(12) + '" font-weight="700" fill="#8a5d00" stroke-width="' + px(3) + '">' + fmt(measureLen(m), 2) + ' m</text>');
   });
 
+  // fire-rated walls and where things cross them
+  (P.firewalls || []).filter(f => f.sheet === s.id).forEach(f => {
+    const d = f.pts.map((q, i) => (i ? 'L' : 'M') + q.x.toFixed(1) + ' ' + q.y.toFixed(1)).join('');
+    const sel = V.sel && V.sel.kind === 'fire' && V.sel.id === f.id;
+    out.push('<path d="' + d + '" fill="none" stroke="#c0392b" stroke-opacity="' + (sel ? 0.5 : 0.25) + '" stroke-width="' + px(10) + '"/>');
+    out.push('<path d="' + d + '" fill="none" stroke="#c0392b" stroke-width="' + px(sel ? 2.5 : 1.5) + '" stroke-dasharray="' + px(10) + ' ' + px(4) + ' ' + px(2) + ' ' + px(4) + '"/>');
+    const q = f.pts[0];
+    if (V.labels >= 1) out.push('<text x="' + (q.x + px(8)) + '" y="' + (q.y - px(8)) + '" font-size="' + px(11) + '" font-weight="800" fill="#a93226" stroke-width="' + px(3) + '">' + esc((f.name || 'FW') + ' ' + (f.rating || 60) + ' min') + '</text>');
+  });
+  (A.fire || []).filter(x => x.sheet === s.id).forEach(x => {
+    out.push('<rect x="' + (x.x - px(5)) + '" y="' + (x.y - px(5)) + '" width="' + px(10) + '" height="' + px(10) + '" fill="#fff" stroke="#c0392b" stroke-width="' + px(2) + '" transform="rotate(45 ' + x.x + ' ' + x.y + ')"/>');
+  });
+
   // containment bands
   P.routes.filter(r => r.sheet === s.id).forEach(r => {
     const pts = routePts(r);
@@ -438,6 +459,19 @@ function render() {
       [-1, 1].forEach(sg => out.push('<path d="' + offsetPath(pts, sg * wpx / 2) + '" fill="none" stroke="' + (bad ? '#bb3b2e' : col) + '" stroke-width="' + px(selR === r.id ? 2 : 1) + '" stroke-opacity="0.9"/>'));
     } else {
       out.push('<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="' + px(selR === r.id ? 2.5 : 1.2) + '"/>');
+    }
+    // a two-tier run: the upper tier is drawn beside the lower one, dashed
+    if (res.tiers === 2 && res.tier2) {
+      const w2 = Math.max((res.tier2.drawMm || 50) * k, px(3));
+      const shift = wpx / 2 + Math.max(60 * k, px(6)) + w2 / 2;
+      out.push('<path d="' + offsetPath(pts, shift) + '" fill="none" stroke="' + col + '" stroke-opacity="0.14" stroke-width="' + w2 + '"/>');
+      [-1, 1].forEach(sg => out.push('<path d="' + offsetPath(pts, shift + sg * w2 / 2) + '" fill="none" stroke="' + col + '" stroke-width="' + px(1) + '" stroke-dasharray="' + px(5) + ' ' + px(3) + '"/>'));
+      if (V.labels >= 1) {
+        const q0 = pts[0], q1 = pts[1];
+        const L0 = Math.hypot(q1.x - q0.x, q1.y - q0.y) || 1;
+        const nx0 = -(q1.y - q0.y) / L0, ny0 = (q1.x - q0.x) / L0;
+        out.push('<text x="' + (q0.x + nx0 * (shift + w2 / 2 + px(10))) + '" y="' + (q0.y + ny0 * (shift + w2 / 2 + px(10))) + '" font-size="' + px(10) + '" font-weight="700" fill="#3c434d" stroke-width="' + px(3) + '">upper tier ' + esc(res.tier2.size || '') + ' +' + (P.settings.tierGapMm || 300) + ' mm</text>');
+      }
     }
     // vertical changes: mark the point where the height changes
     for (let i = 1; i < pts.length; i++) {
@@ -481,7 +515,12 @@ function render() {
     }
     lay.items.forEach(cb => {
       const w = cb.od * k * f;
-      const o = cb.off * k * f;
+      let o = cb.off * k * f;
+      if (cb.tier === 2) {
+        const res0 = A.routes.get(r.id) || {};
+        const wpx0 = Math.max((res0.drawMm || 100) * k, px(3)), w2 = Math.max(((res0.tier2 || {}).drawMm || 50) * k, px(3));
+        o += wpx0 / 2 + Math.max(60 * k, px(6)) + w2 / 2;
+      }
       const c = circById(cb.cid);
       if (!c) return;
       // only the stretch of this piece the cable actually rides
@@ -644,7 +683,7 @@ function draftSvg(px) {
     const L = Math.hypot(V.cursor.x - d.pts[0].x, V.cursor.y - d.pts[0].y);
     out.push('<text x="' + (V.cursor.x + px(8)) + '" y="' + (V.cursor.y - px(8)) + '" font-size="' + px(12) + '" font-weight="700" fill="#8a5d00" stroke-width="' + px(3) + '">' + fmt(L, 0) + ' px</text>');
   }
-  if ((d.tool === 'tape' || d.tool === 'contain' || d.tool === 'cable') && pts.length > 1) {
+  if ((d.tool === 'tape' || d.tool === 'firewall' || d.tool === 'contain' || d.tool === 'cable') && pts.length > 1) {
     let L = 0;
     for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
     const last = pts[pts.length - 1];
@@ -692,6 +731,7 @@ const TOOLS = [
   '-',
   ['contain', 'T', 'Contain', '<path d="M3 8h18M3 16h18" stroke="currentColor" stroke-width="1.8"/><path d="M6 8v8M10 8v8M14 8v8M18 8v8" stroke="currentColor" stroke-width="1" opacity=".7"/>'],
   ['cable', 'C', 'Cable', '<path d="M3 18c4 0 4-12 9-12s5 12 9 12" fill="none" stroke="currentColor" stroke-width="2.2"/>'],
+  ['firewall', 'W', 'Fire wall', '<path d="M4 3v18M20 3v18" stroke="currentColor" stroke-width="1.6"/><path d="M12 6c2 3 3 5 1 8 2-1 3-3 3-5 2 3 2 7-1 9-3 1-6 0-7-3-1-3 1-5 2-6 0 2 1 3 2 3-1-2-1-4 0-6z" fill="currentColor"/>'],
   ['tape', 'M', 'Tape', '<rect x="3" y="8" width="18" height="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 8v3M11 8v4M15 8v3M19 8v4" stroke="currentColor" stroke-width="1.4"/>'],
   '-',
   ['delete', 'Del', 'Delete', '<path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="1.8"/>']
@@ -709,12 +749,13 @@ const HINTS = {
   riser: 'Click to place a riser. Give risers on different sheets the same name and containment joins through them.',
   contain: 'Click along the containment. Change <b>Height</b> before a click to rise or drop — click the last point again for a vertical riser. Start or finish on an existing run to tee in. <kbd>Enter</kbd> or double-click finishes.',
   cable: 'Click a board, then click along the containment (or free points), then the isolator or load. Board → isolator, then isolator → load for the tail. Board → load straight, and it routes through the containment by itself.',
-  tape: 'Click along the route to measure. <kbd>Enter</kbd> to keep it.'
+  tape: 'Click along the route to measure. <kbd>Enter</kbd> to keep it.',
+  firewall: 'Click along a fire-rated wall or floor line. <kbd>Enter</kbd> to finish. Every run and cable crossing it gets a fire seal or sleeve in the take-off.'
 };
 function setTool(t) {
   if (t === 'delete') { deleteSelected(); return; }
   if (!sheet() && t !== 'select') { toast('Open a drawing or a grid sheet first'); return; }
-  if ((t === 'contain' || t === 'cable' || t === 'tape') && sheet() && !(sheet().pxPerM > 0)) { toast('Set the scale first (S)'); t = 'scale'; }
+  if ((t === 'contain' || t === 'cable' || t === 'tape' || t === 'firewall') && sheet() && !(sheet().pxPerM > 0)) { toast('Set the scale first (S)'); t = 'scale'; }
   V.tool = t;
   V.draft = null; V.snap = null;
   if (V.traceH == null) V.traceH = P.settings.containHeight;
@@ -730,7 +771,7 @@ function syncHint() {
   if (t === 'select') { h.classList.remove('on'); return; }
   h.classList.add('on');
   el('hintTxt').innerHTML = HINTS[t] || '';
-  const tracing = t === 'contain' || t === 'cable' || t === 'tape';
+  const tracing = t === 'contain' || t === 'cable' || t === 'tape' || t === 'firewall';
   el('hintAngleWrap').style.display = tracing ? '' : 'none';
   el('hintOrthoWrap').style.display = tracing ? '' : 'none';
   el('hintHgt').style.display = (t === 'contain' || t === 'cable') ? '' : 'none';
@@ -1024,7 +1065,7 @@ function scaleClick(p) {
   setTimeout(() => el('scLen') && el('scLen').focus(), 30);
 }
 function tapeClick(p) {
-  const d = V.draft || (V.draft = { tool: 'tape', pts: [] });
+  const d = V.draft || (V.draft = { tool: V.tool, pts: [] });
   const prev = d.pts[d.pts.length - 1];
   const o = orthoPoint(prev, p);
   if (prev && Math.hypot(prev.x - o.x, prev.y - o.y) < 10 / V.zoom) { finishTape(); return; }
@@ -1035,6 +1076,16 @@ function finishTape() {
   const d = V.draft;
   if (!d || d.pts.length < 2) { V.draft = null; scheduleRender(); return; }
   pushUndo();
+  if (d.tool === 'firewall') {
+    P.firewalls = P.firewalls || [];
+    const w = { id: C.nid(P, 'f'), sheet: P.active, pts: d.pts, rating: Number(P.settings.fireRating) || 60, name: 'FW' + (P.firewalls.length + 1) };
+    P.firewalls.push(w);
+    V.draft = null;
+    changed(); syncHint();
+    const n = (A.fire || []).filter(x => x.wall === w.id).length;
+    toast(w.name + ' — ' + w.rating + ' min, ' + n + ' crossing' + (n === 1 ? '' : 's'));
+    return;
+  }
   const m = { id: C.nid(P, 'm'), sheet: P.active, pts: d.pts };
   P.measures.push(m);
   V.draft = null;
@@ -1044,7 +1095,7 @@ function finishTape() {
 function finishDraft() {
   if (!V.draft) return;
   if (V.draft.tool === 'contain') finishContain();
-  else if (V.draft.tool === 'tape') finishTape();
+  else if (V.draft.tool === 'tape' || V.draft.tool === 'firewall') finishTape();
   else if (V.draft.tool === 'cable') toast('Finish a cable on a load, isolator or board');
 }
 
@@ -1058,6 +1109,7 @@ function selObject() {
   if (s.kind === 'route') return routeById(s.id);
   if (s.kind === 'circ') return circById(s.id);
   if (s.kind === 'measure') return P.measures.find(m => m.id === s.id);
+  if (s.kind === 'fire') return (P.firewalls || []).find(f => f.id === s.id);
   if (s.kind === 'multi') return s;
   return null;
 }
@@ -1079,6 +1131,8 @@ function selectAt(p) {
   if (sg) { select('route', sg.route.id); return { kind: 'route' }; }
   const m = hitMeasure(p);
   if (m) { select('measure', m.id); return { kind: 'measure' }; }
+  const fw = hitFire(p);
+  if (fw) { select('fire', fw.id); return { kind: 'fire' }; }
   return null;
 }
 function deleteSelected() {
@@ -1101,6 +1155,8 @@ function deleteSelected() {
     P.routes = P.routes.filter(x => x.id !== s.id);
   } else if (s.kind === 'circ') {
     P.circuits = P.circuits.filter(c => c.id !== s.id);
+  } else if (s.kind === 'fire') {
+    P.firewalls = (P.firewalls || []).filter(f => f.id !== s.id);
   } else if (s.kind === 'measure') {
     P.measures = P.measures.filter(m => m.id !== s.id);
   }
@@ -1143,7 +1199,7 @@ function onDown(ev) {
   if (t === 'contain') { containClick(p); return; }
   if (t === 'cable') { cableClick(p); return; }
   if (t === 'scale') { scaleClick(p); return; }
-  if (t === 'tape') { tapeClick(p); return; }
+  if (t === 'tape' || t === 'firewall') { tapeClick(p); return; }
 }
 function onMove(ev) {
   if (V.pan) {
@@ -1181,7 +1237,7 @@ function onMove(ev) {
     solveNow(); scheduleRender();
     return;
   }
-  if (V.tool === 'contain' || V.tool === 'cable' || V.tool === 'tape' || V.tool === 'scale') {
+  if (V.tool === 'contain' || V.tool === 'cable' || V.tool === 'tape' || V.tool === 'firewall' || V.tool === 'scale') {
     let sn = null;
     if (V.tool === 'contain') sn = snapContain(p);
     else if (V.tool === 'cable') sn = snapCable(p);
@@ -1243,6 +1299,7 @@ function renderInspector() {
   else if (k === 'route') h = routeForm(o);
   else if (k === 'circ') h = circForm(o);
   else if (k === 'multi') h = multiForm(o);
+  else if (k === 'fire') h = fireForm(o);
   else if (k === 'measure') h = '' + hd('Tape', fmt(measureLen(o), 2) + ' m') + '<div class="insp-bd"><p class="note">A plan measurement only — not counted in the take-off.</p><div class="insp-actions"><button class="btn danger sm" data-act="delete">Delete</button></div></div>';
   box.innerHTML = h;
 }
@@ -1299,6 +1356,10 @@ function nodeForm(n) {
       h += F('Starting', sel('node', 'drive', n.drive || 'DOL', Object.keys(E.DRIVES).filter(d => d !== 'NA').map(d => [d, E.DRIVES[d].label])));
       h += F('Peak / start current', num('node', 'peakA', n.peakA, 'A', 'placeholder="' + fmt(dc.start, 0) + '"'));
       h += F('Start × FLC', num('node', 'startMult', n.startMult, '×', 'placeholder="' + (E.DRIVES[n.drive || 'DOL'] || {}).start + '"'));
+      if (n.drive === 'VSD') {
+        h += F('Drive is', sel('node', 'drivePos', n.drivePos || 'integral', [['integral', 'At the motor / integral (supply cable is mains)'], ['panel', 'In the panel (the run is the motor cable)']]));
+        if (n.drivePos === 'panel') h += F('Max motor cable', num('node', 'vsdMaxM', n.vsdMaxM, 'm (drive data)', 'placeholder="' + E.VSD_MAX_DEFAULT + '"'));
+      }
     }
     h += F('Outdoor', chk('node', 'outdoor', n.outdoor));
     h += '<table class="kv"><tr><td>Design current Ib</td><td>' + fmt(dc.ib, 2) + ' A</td></tr>' + (dc.typed ? '<tr><td>From kW (for reference)</td><td>' + fmt(dc.fromKw, 2) + ' A</td></tr>' : '') + (kd.motor ? '<tr><td>Starting / peak</td><td>' + fmt(dc.start, 0) + ' A</td></tr>' : '') + '</table>';
@@ -1334,6 +1395,15 @@ function nodeForm(n) {
   return h;
 }
 
+function fireForm(f) {
+  const n = (A.fire || []).filter(x => x.wall === f.id);
+  let h = hd('Fire-rated wall / floor', f.name || 'Fire wall') + '<div class="insp-bd">';
+  h += F('Name', inp('fire', 'name', f.name));
+  h += F('Fire rating', sel('fire', 'rating', f.rating || 60, [[30, '30 minutes'], [60, '60 minutes'], [90, '90 minutes'], [120, '120 minutes'], [240, '240 minutes']]));
+  h += '<p class="note">' + n.filter(x => x.kind === 'contain').length + ' containment crossing(s), ' + n.filter(x => x.kind === 'cable').length + ' loose cable crossing(s). Each gets a fire seal (batt / pillow, intumescent conduit seal or trunking barrier) or an intumescent sleeve in the take-off.</p>';
+  h += '<div class="insp-actions"><button class="btn danger sm" data-act="delete">Delete</button></div></div>';
+  return h;
+}
 function routeForm(r) {
   const res = A.routes.get(r.id) || {};
   const def = E.CONTAINMENT[r.type] || E.CONTAINMENT.tray;
@@ -1353,6 +1423,11 @@ function routeForm(r) {
     if (r.orient === 'wall') h += F('Wall side', sel('route', 'side', r.side || 1, [[1, 'Left of the trace direction'], [-1, 'Right of the trace direction']]));
   }
   if (def.fill === 'conduit') h += F('In an insulated wall', chk('route', 'inWall', r.inWall));
+  if (def.fill === 'width') {
+    h += F('Tiers', sel('route', 'tiers', r.tiers || 1, [[1, 'One tier'], [2, 'Two tiers — control / data on the upper']]));
+    if (Number(r.tiers) === 2) h += F('Upper tier width', sel('route', 'width2', r.width2 || '', [['', 'Auto (' + (res.tier2 && res.tier2.auto ? res.tier2.auto + ' mm' : '—') + ')']].concat(def.widths.map(w => [w, w + ' mm']))));
+  }
+  h += F('Escape route', chk('route', 'escape', r.escape));
   h += '<h4>Fixing</h4>';
   h += F('Method', sel('route', 'mount', r.mount || defaultMount(r.type), Object.keys(E.MOUNTS).map(k => [k, E.MOUNTS[k]])));
   if (r.mount === 'droprod' || r.mount === 'beamclamp' || (!r.mount && defaultMount(r.type) === 'droprod')) h += F('Soffit height', num('route', 'soffit', r.soffit, 'm', 'placeholder="' + P.settings.soffit + '"'));
@@ -1369,6 +1444,16 @@ function routeForm(r) {
     + '<tr><td>Selected</td><td>' + esc(res.size || '—') + '</td></tr>'
     + '<tr><td>Fill</td><td style="color:' + (res.ok ? 'inherit' : 'var(--alarm)') + '">' + (res.fillPct != null ? fmt(res.fillPct, 0) + ' %' : '—') + '</td></tr>'
     + '</table>';
+  // tray loading
+  [[res.load, ''], [res.tier2 && res.tier2.load, 'Upper tier ']].forEach(([ld, pre]) => {
+    if (!ld || ld.swl == null) return;
+    h += '<p class="note ' + (ld.ok ? '' : 'bad') + '">' + pre + 'Cable load <b>' + fmt(ld.kg, 1) + ' kg/m</b> of a ' + fmt(ld.swl, 0) + ' kg/m safe load at ' + fmt(res.spacing || Number(r.spacing) || P.settings.spacing[r.type], 2) + ' m centres (' + fmt(ld.pct, 0) + ' %).' + (ld.ok ? '' : ' Closer supports or a heavier duty.') + '</p>';
+  });
+  if (res.fire) h += '<p class="note">Carries fire-resistant cable: metal supports and metal ties throughout (521.10.202).</p>';
+  if (res.stepPlan) {
+    h += '<p class="note warn"><b>Could step down</b> as cables leave it: ' + res.stepPlan.parts.map(p => p.width + ' mm for ' + fmt(p.to - p.from, 1) + ' m').join(' → ') + ' — saves ' + fmt(res.stepPlan.savingM, 1) + ' m of ' + res.width + ' mm.</p>';
+    h += '<div class="insp-actions"><button class="btn ghost sm" data-act="stepdown">Split the run and step down</button></div>';
+  }
   if (res.bendWarn) h += '<p class="note warn">Largest cable ' + fmt(res.maxOd, 1) + ' mm needs about ' + Math.round(res.bendR) + ' mm internal bend radius — more than a standard ' + (P.settings.trayBendR || 150) + ' mm bend. Use cable ladder with large-radius bends.</p>';
   if (res.ok === false) h += '<p class="note bad">Over-full. Go up a size, split the run, or move circuits to another route.</p>';
   else if (res.okSpare === false) h += '<p class="note warn">Fits, but without the ' + P.settings.spare + ' % spare.</p>';
@@ -1403,7 +1488,7 @@ function circForm(c) {
     h += F('Breaking capacity', sel('dev', 'kA', dev.kA, fam.kA.map(x => [x, x + ' kA'])));
     if (dev.family === 'mccb') h += F('Magnetic setting Im', num('dev', 'im', dev.im, '× In'));
     h += F('RCD', sel('dev', 'rcd', (c.device && c.device.rcd) || 0, [[0, 'None'], [30, '30 mA'], [100, '100 mA'], [300, '300 mA']]));
-    if (c.kind === 'power' && t && E.LOAD_KINDS[t.loadKind] && E.LOAD_KINDS[t.loadKind].motor) h += F('Overload at starter', chk('circ', 'overloadAtStarter', c.overloadAtStarter));
+    if (c.kind === 'power' && t && E.LOAD_KINDS[t.loadKind] && E.LOAD_KINDS[t.loadKind].motor) h += F('Overload at starter', chk('circ', 'overloadAtStarter', c.overloadAtStarter != null ? c.overloadAtStarter : ['DOL', 'SD', 'SS'].includes(t.drive || 'DOL')));
     // headline
     h += '<div class="legbox ' + (r.ok ? '' : 'bad') + '"><div class="big">' + esc(r.deviceText || '—') + '</div>'
       + '<table class="kv"><tr><td>Design current Ib</td><td>' + fmt(r.ib, 2) + ' A</td></tr>'
@@ -1493,7 +1578,7 @@ function onInspectorChange(ev) {
   if (!obj) return;
   if (o === 'multi') { applyMulti(k, v); return; }
   pushUndo();
-  if (o === 'node' || o === 'route' || o === 'circ') {
+  if (o === 'node' || o === 'route' || o === 'circ' || o === 'fire') {
     if (v == null) delete obj[k]; else obj[k] = v;
     if (o === 'circ' && k === 'ref') obj.refAuto = false;
     if (o === 'node' && k === 'riser') obj.name = 'Riser ' + v;
@@ -1574,6 +1659,15 @@ function onInspectorClick(ev) {
     pushUndo();
     o.pts.forEach(p => { p.h = hv; });
     changed(); return;
+  }
+  if (act === 'stepdown') {
+    const res = A.routes.get(o.id);
+    if (!res || !res.stepPlan) return;
+    pushUndo();
+    const made = C.splitRoute(P, o.id, res.stepPlan.cuts);
+    changed();
+    toast('Split into ' + (made.length + 1) + ' runs — reducers counted at the joins');
+    return;
   }
   if (act === 'reverse') { pushUndo(); o.pts.reverse(); changed(); return; }
 }
@@ -1666,6 +1760,8 @@ function basisDialog() {
   h += F('Power / data segregation', Sel('segMethod', s.segMethod, [['divider', 'Divider in the tray (BS EN 50174-2)'], ['gap', 'Clear gap, no divider'], ['separate', 'Separate containment — flag shared runs']]));
   h += F('Divider allowance', S('segDividerMm', s.segDividerMm, 'mm of width'));
   h += F('Clear gap', S('segGapMm', s.segGapMm, 'mm, when no divider'));
+  h += F('Gap between tiers', S('tierGapMm', s.tierGapMm, 'mm'));
+  h += F('Default fire rating', Sel('fireRating', s.fireRating, [[30, '30 min'], [60, '60 min'], [90, '90 min'], [120, '120 min']]));
   h += F('Default finish', Sel('defFinish', s.defFinish, Object.keys(E.FINISHES).filter(k => k !== 'pvc').map(k => [k, E.FINISHES[k]])));
   h += F('Default fixing', Sel('defMount', s.defMount, Object.keys(E.MOUNTS).map(k => [k, E.MOUNTS[k]])));
   h += F('Containment wastage', S('wasteContain', s.wasteContain, '%'));
@@ -1847,7 +1943,7 @@ function wire() {
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
   sc.addEventListener('contextmenu', ev => ev.preventDefault());
-  sc.addEventListener('dblclick', ev => { if (V.draft && (V.draft.tool === 'contain' || V.draft.tool === 'tape')) { ev.preventDefault(); finishDraft(); } else if (!V.draft && V.tool === 'select' && !selObject()) setZoom(V.zoom * 1.6, ev); });
+  sc.addEventListener('dblclick', ev => { if (V.draft && (V.draft.tool === 'contain' || V.draft.tool === 'tape' || V.draft.tool === 'firewall')) { ev.preventDefault(); finishDraft(); } else if (!V.draft && V.tool === 'select' && !selObject()) setZoom(V.zoom * 1.6, ev); });
   sc.addEventListener('wheel', ev => { ev.preventDefault(); setZoom(V.zoom * Math.pow(1.0018, -ev.deltaY), ev); }, { passive: false });
 
   el('insp').addEventListener('change', onInspectorChange);
@@ -1951,7 +2047,7 @@ function onKey(ev) {
     return;
   }
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-  const map = { v: 'select', s: 'scale', b: 'board', l: 'load', i: 'isolator', d: 'device', r: 'riser', t: 'contain', c: 'cable', m: 'tape' };
+  const map = { v: 'select', s: 'scale', b: 'board', l: 'load', i: 'isolator', d: 'device', r: 'riser', t: 'contain', c: 'cable', m: 'tape', w: 'firewall' };
   const k = ev.key.toLowerCase();
   if (map[k]) { setTool(map[k]); return; }
   if (k === 'o') { P.settings.ortho = !P.settings.ortho; syncHint(); toast(P.settings.ortho ? 'Square corners on' : 'Free angles'); return; }

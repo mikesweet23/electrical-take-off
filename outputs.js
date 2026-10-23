@@ -54,7 +54,7 @@
   function containRows() {
     const P = CT.P, A = CT.A;
     const TK = CT.getTK();
-    const head = ['Run', 'Sheet', 'Type', 'Duty', 'Finish', 'Size', 'Plan m', 'Vertical m', 'Total m', 'Cables', 'Circuits', 'Grouped', 'Segregation', 'Σ OD mm', 'Needed mm', 'Fill %', 'Fixing', 'Spacing m', 'Supports', 'Fittings', 'Status'];
+    const head = ['Run', 'Sheet', 'Type', 'Duty', 'Finish', 'Size', 'Plan m', 'Vertical m', 'Total m', 'Cables', 'Circuits', 'Grouped', 'Segregation', 'Σ OD mm', 'Needed mm', 'Fill %', 'Upper tier', 'Load kg/m', 'Safe load kg/m', 'Load %', 'Fixing', 'Spacing m', 'Supports', 'Fittings', 'Could step down', 'Status'];
     const rows = P.routes.map(r => {
       const res = A.routes.get(r.id) || {};
       const def = E.CONTAINMENT[r.type] || E.CONTAINMENT.tray;
@@ -64,14 +64,17 @@
         rid: r.id, ok: res.ok !== false, warn: res.okSpare === false,
         cells: [r.name, sheetName(r.sheet), def.label, def.duties[r.duty || def.defaultDuty] || '', r.type.startsWith('pvc') ? 'PVC' : (E.FINISHES[r.finish || P.settings.defFinish] || ''),
           res.size || '', n2(res.lens ? res.lens.plan : 0, 2), n2(res.lens ? res.lens.vert : 0, 2), n2(res.lens ? res.lens.total : 0, 2),
-          res.cables || 0, res.nCircuits || 0, res.maxGrouped || 0, res.mixed ? (res.seg === 'divider' ? (def.fill === 'area' ? 'Compartment' : 'Divider') : res.seg === 'gap' ? res.sepMm + ' mm gap' : 'Separate') : '', n2(res.sumOd, 1), def.fill === 'width' ? n2(res.reqMm, 0) : '', n2(res.fillPct, 0),
+          res.cables || 0, res.nCircuits || 0, res.maxGrouped || 0, res.tiers === 2 ? 'Two tiers' : res.mixed ? (res.seg === 'divider' ? (def.fill === 'area' ? 'Compartment' : 'Divider') : res.seg === 'gap' ? res.sepMm + ' mm gap' : 'Separate') : '', n2(res.sumOd, 1), def.fill === 'width' ? n2(res.reqMm, 0) : '', n2(res.fillPct, 0),
+          res.tiers === 2 && res.tier2 ? res.tier2.size : '',
+          res.load ? n2(res.load.kg, 1) : '', res.load && res.load.swl != null ? n2(res.load.swl, 0) : '', res.load && res.load.pct != null ? n2(res.load.pct, 0) : '',
           E.MOUNTS[res.mount] || '', n2(res.spacing, 2), res.supports || 0,
           Object.keys(f).filter(k => f[k] && names[k]).map(k => f[k] + '× ' + names[k]).join(', '),
-          res.ok === false ? 'OVER-FULL' : res.okSpare === false ? 'No spare' : 'OK']
+          res.stepPlan ? res.stepPlan.parts.map(p => p.width + ' mm × ' + (p.to - p.from).toFixed(1) + ' m').join(' → ') : '',
+          res.ok === false ? 'OVER-FULL' : (res.load && !res.load.ok) || (res.tier2 && res.tier2.load && !res.tier2.load.ok) ? 'OVERLOADED' : res.okSpare === false ? 'No spare' : 'OK']
       };
     });
     (A.risers || new Map()).forEach((res, key) => {
-      rows.push({ ok: res.ok !== false, cells: ['Riser ' + key, '', (E.CONTAINMENT[res.kind] || {}).label + ' (riser)', '', '', res.size, 0, n2(res.len, 2), n2(res.len, 2), res.cables, '', '', res.mixed ? 'Divider' : '', n2(res.sumOd, 1), n2(res.reqMm, 0), n2(res.fillPct, 0), E.MOUNTS.wallbracket, '', '', '', res.ok === false ? 'OVER-FULL' : 'OK'] });
+      rows.push({ ok: res.ok !== false, cells: ['Riser ' + key, '', (E.CONTAINMENT[res.kind] || {}).label + ' (riser)', '', '', res.size, 0, n2(res.len, 2), n2(res.len, 2), res.cables, '', '', res.mixed ? 'Divider' : '', n2(res.sumOd, 1), n2(res.reqMm, 0), n2(res.fillPct, 0), '', '', '', '', E.MOUNTS.wallbracket, '', '', '', '', res.ok === false ? 'OVER-FULL' : 'OK'] });
     });
     return { head, rows };
   }
@@ -89,6 +92,7 @@
     sec.push({ title: 'Fixings & supports', head: ['Item', 'Unit', 'Qty'], rows: list(TK.fixings).sort((a, b) => a.desc.localeCompare(b.desc)).map(v => [v.desc, v.unit, v.unit === 'm' ? n2(v.qty, 1) : Math.ceil(v.qty)]) });
     sec.push({ title: 'Isolators', head: ['Isolator', 'Rating A', 'Poles', 'Aux', 'Enclosure', 'IP', 'Qty'], rows: list(TK.isolators).map(v => [v.desc, v.rating || '', v.poles, v.aux ? 'Yes' : 'No', v.enclosure, v.ip, v.qty]) });
     sec.push({ title: 'Glands & terminations', head: ['Item', 'Type', 'Size', 'Qty'], rows: list(TK.glands).sort((a, b) => a.desc.localeCompare(b.desc)).map(v => [v.desc, v.type, v.size, v.qty]) });
+    if (TK.fire && TK.fire.size) sec.push({ title: 'Fire stopping', head: ['Item', 'Rating', 'Qty'], rows: list(TK.fire).map(v => [v.desc, v.rating, v.qty]) });
     sec.push({ title: 'Flexible conduit', head: ['Item', 'Unit', 'Qty'], rows: list(TK.flex).map(v => [v.desc, v.unit, v.unit === 'm' ? n2(v.qty * (1 + (P.settings.wasteCable || 0) / 100), 1) : v.qty]) });
     sec.push({ title: 'Protective devices', head: ['Board', 'Device', 'kA', 'Qty'], rows: list(TK.devices).sort((a, b) => a.board.localeCompare(b.board)).map(v => [v.board, v.desc, v.kA, v.qty]) });
     if (TK.field.size) sec.push({ title: 'Field devices', head: ['Device', 'Qty'], rows: list(TK.field).map(v => [v.desc, v.qty]) });
@@ -107,7 +111,37 @@
     return { head, rows };
   }
   function issueRows() {
-    return { head: ['Severity', 'Issue'], rows: (CT.A.issues || []).map(i => ({ ok: i.sev !== 'fail', warn: i.sev === 'warn', cells: [i.sev === 'fail' ? 'Fail' : 'Check', i.text], i })) };
+    return { head: ['Severity', 'Issue'], rows: (CT.A.issues || []).map(i => ({ ok: i.sev !== 'fail', warn: i.sev === 'warn', cells: [i.sev === 'fail' ? 'Fail' : i.sev === 'info' ? 'Suggestion' : 'Check', i.text], i })) };
+  }
+
+  // One schedule per board, way by way — the same figures an installer's
+  // test sheet needs. Maximum measured Zs is the design maximum × 0.8
+  // (GN3 rule of thumb for a reading taken cold).
+  function boardRows() {
+    const P = CT.P, A = CT.A;
+    const head = ['Way', 'Circuit', 'Serves', 'Phase', 'Device', 'kA', 'RCD', 'Ib A', 'In A', 'Cable', 'CPC mm²', 'Method', 'Iz A', 'Length m', 'VD %', 'Zs design Ω', 'Zs max Ω', 'Max measured Zs Ω', 'Disconnect s', 'Status'];
+    const groups = [];
+    P.nodes.filter(n => n.kind === 'board').forEach(b => {
+      const rows = [];
+      P.circuits.filter(c => c.board === b.id).forEach((c, i) => {
+        const r = A.results.get(c.id);
+        if (!r) return;
+        const leg = (r.legs || [])[0] || {};
+        const tail = (r.legs || [])[1];
+        const serves = c.kind === 'submain' ? 'Sub-main to ' + nodeName(c.target) : [nodeName(c.iso), nodeName(c.target)].filter(Boolean).join(' → ');
+        const cab = (r.legs || []).map(l => (l.cores ? l.cores + (E.CABLE_TYPES[l.type] && E.CABLE_TYPES[l.type].coreWord === 'pair' ? 'pr ' : 'c ') : '') + l.size + ' mm² ' + l.short).join(' + ');
+        const len = (r.legs || []).reduce((a, l) => a + (l.lengthM || 0), 0);
+        rows.push({ cid: c.id, ok: r.ok, warn: (r.checks || []).some(x => x.warn && !x.ok), cells: [
+          i + 1, c.ref, serves, c.kind === 'control' ? '' : (r.phase === 1 ? '1ph' : '3ph'),
+          c.kind === 'control' ? (c.ctrl && c.ctrl.signal ? 'Signal' : (c.ctrl && c.ctrl.volts || 24) + ' V control') : (r.deviceText || ''), r.kA || '', c.device && c.device.rcd ? c.device.rcd + ' mA' : '',
+          n2(r.ib, 2), r.In || '', cab, [leg.cpcArea, tail && tail.cpcArea].filter(Boolean).join(' / '), leg.method || '', n2(r.iz, 1), n2(len, 1), n2(r.vdPct, 2),
+          n2(r.zs, 3), n2(r.zmax, 3), r.zmax ? n2(r.zmax * 0.8, 2) : '', r.tReq || '',
+          r.ok ? 'Pass' : 'FAIL'] });
+      });
+      const st = A.boards.get(b.id) || {};
+      groups.push({ board: b, head, rows, note: (b.boardKind || 'DB') + ' · ' + (b.phase === 1 ? 'SP&N' : 'TP&N') + ' · Ib ' + n2(st.ib, 1) + ' A · Zdb ' + n2(st.zdb, 3) + ' Ω · PFC ' + n2(st.pfcKA, 2) + ' kA · upstream VD ' + n2(st.upstreamPct, 2) + ' %' });
+    });
+    return groups;
   }
 
   // ------------------------------------------------------------------
@@ -134,6 +168,10 @@
       const TK = CT.getTK();
       h = tableHtml(isoRows()) + '<table class="sched" style="margin-top:8px"><thead><tr><th>Gland / termination</th><th>Type</th><th>Size</th><th>Qty</th></tr></thead><tbody>' + [...TK.glands.values()].map(v => '<tr><td>' + esc(v.desc) + '</td><td>' + esc(v.type) + '</td><td>' + esc(v.size) + '</td><td class="n">' + v.qty + '</td></tr>').join('') + '</tbody></table>';
       note.textContent = 'Glands counted at both ends of each armoured cable';
+    }
+    else if (tab === 'boards') {
+      h = boardRows().map(g => '<div style="padding:8px 10px 2px;font-weight:800;font-size:12.5px">' + esc(g.board.name) + ' <span style="font-weight:500;color:var(--muted)">' + esc(g.note) + '</span></div>' + (g.rows.length ? tableHtml(g, true) : '<p class="note" style="padding:0 10px">No circuits yet.</p>')).join('');
+      note.textContent = 'Max measured Zs = design max × 0.8 (GN3), for test sheets';
     }
     else if (tab === 'issues') { const t = issueRows(); h = t.rows.length ? tableHtml(t) : '<p class="note" style="padding:12px;color:var(--live)">Nothing fails.</p>'; note.textContent = ''; }
     body.innerHTML = h;
@@ -223,6 +261,12 @@
       if (depth) [1, -1].forEach(sg => prims.push({ t: 'poly', pts: [{ x: A3.x + nx * sg, y: A3.y + ny * sg, z: A3.z }, { x: B3.x + nx * sg, y: B3.y + ny * sg, z: B3.z }, { x: B3.x + nx * sg, y: B3.y + ny * sg, z: B3.z + depth }, { x: A3.x + nx * sg, y: A3.y + ny * sg, z: A3.z + depth }], fill: hexA(col, 0.18), stroke: col, lw: 1 }));
       // cables across it, laid out exactly as on the plan (C.edgeLayout)
       const lay = C.edgeLayout(P, A, e.id);
+      const tierZ = (P.settings.tierGapMm || 300) / 1000;
+      if (lay.tiers === 2 && !kk) {
+        const w2 = (lay.W2 || 100) / 1000;
+        const ux2 = nx / (w / 2) * w2 / 2, uy2 = ny / (w / 2) * w2 / 2;
+        prims.push({ t: 'poly', pts: [{ x: A3.x + ux2, y: A3.y + uy2, z: A3.z + tierZ }, { x: B3.x + ux2, y: B3.y + uy2, z: B3.z + tierZ }, { x: B3.x - ux2, y: B3.y - uy2, z: B3.z + tierZ }, { x: A3.x - ux2, y: A3.y - uy2, z: A3.z + tierZ }], fill: hexA(col, 0.22), stroke: col, lw: 1 });
+      }
       const ux = nx / (w / 2), uy = ny / (w / 2);
       const at = (t, o, dz) => ({ x: A3.x + (B3.x - A3.x) * t + (kk ? 0 : ux * o), y: A3.y + (B3.y - A3.y) * t + (kk ? 0 : uy * o), z: A3.z + (B3.z - A3.z) * t + (kk ? o + w / 2 : dz) });
       if (lay.divider != null) {
@@ -234,7 +278,9 @@
         const o = cb.off / 1000;
         const c = CT.circById(cb.cid); if (!c) return;
         const t0 = cb.t0 != null ? cb.t0 : 0, t1 = cb.t1 != null ? cb.t1 : 1;
-        prims.push({ t: 'line', a: at(t0, o, d / 2), b: at(t1, o, d / 2), stroke: CT.circColour(c), lw: 2 });
+        const up = cb.tier === 2 && !kk ? tierZ : 0;
+        const pa1 = at(t0, o, d / 2 + up), pb1 = at(t1, o, d / 2 + up);
+        prims.push({ t: 'line', a: pa1, b: pb1, stroke: CT.circColour(c), lw: 2 });
       });
       // drop rods
       if (opts.fixings && (r.mount === 'droprod' || r.mount === 'beamclamp' || (!r.mount && P.settings.defMount === 'droprod')) && e.plan > 0.01) {
@@ -247,6 +293,15 @@
           const x = A3.x + (B3.x - A3.x) * t, y = A3.y + (B3.y - A3.y) * t, z = A3.z + (B3.z - A3.z) * t;
           [1, -1].forEach(sg => prims.push({ t: 'line', a: { x: x + nx * sg * 1.1, y: y + ny * sg * 1.1, z }, b: { x: x + nx * sg * 1.1, y: y + ny * sg * 1.1, z: Number(lev) + soffit }, stroke: 'rgba(90,90,90,0.55)', lw: 1 }));
         }
+      }
+    });
+    // fire-rated walls as translucent red planes, floor to soffit
+    (P.firewalls || []).forEach(f => {
+      if (!onSheet(f.sheet)) return;
+      const top = P.settings.soffit || 4;
+      for (let i = 1; i < f.pts.length; i++) {
+        const a0 = worldOf(f.sheet, f.pts[i - 1].x, f.pts[i - 1].y, 0), b0 = worldOf(f.sheet, f.pts[i].x, f.pts[i].y, 0);
+        prims.push({ t: 'poly', pts: [a0, b0, { x: b0.x, y: b0.y, z: b0.z + top }, { x: a0.x, y: a0.y, z: a0.z + top }], fill: 'rgba(192,57,43,0.10)', stroke: 'rgba(192,57,43,0.6)', lw: 1 });
       }
     });
     // cables off containment
@@ -458,6 +513,7 @@
       + '<h2 class="pb">Cable schedule</h2>' + tbl(cableRows())
       + '<h2>Containment</h2>' + tbl(containRows())
       + '<h2 class="pb">Take-off</h2>' + boqSections().map(sec => '<h3>' + esc(sec.title) + '</h3>' + (sec.rows.length ? tbl({ head: sec.head, rows: sec.rows }) : '<p class="note">None</p>')).join('')
+      + '<h2 class="pb">Board schedules</h2>' + boardRows().map(g => '<h3>' + esc(g.board.name) + ' — ' + esc(g.note) + '</h3>' + (g.rows.length ? tbl(g) : '<p class="note">No circuits.</p>')).join('')
       + '<h2>Isolators</h2>' + tbl(isoRows())
       + (A.issues.length ? '<h2>Issues</h2>' + tbl(issueRows()) : '')
       + plans.map(p => '<div class="plan"><h2>' + esc(p.s.name) + (p.s.level ? ' — floor level +' + fmt(p.s.level, 2) + ' m' : '') + '</h2>' + (p.img ? '<img src="' + p.img + '">' : '<p class="note">Plan could not be drawn.</p>') + '</div>').join('')
@@ -488,6 +544,9 @@
     sheets.push({ name: 'Isolators', rows: [i.head].concat(i.rows.map(r => r.cells)) });
     const TK = CT.getTK();
     sheets.push({ name: 'Glands', rows: [['Item', 'Type', 'Size', 'Qty']].concat([...TK.glands.values()].map(v => [v.desc, v.type, v.size, v.qty])) });
+    const brows = [];
+    boardRows().forEach(g => { brows.push([g.board.name, g.note]); brows.push(g.head); g.rows.forEach(r => brows.push(r.cells)); brows.push([]); });
+    sheets.push({ name: 'Board schedules', rows: brows.length ? brows : [['No boards']] });
     const iss = issueRows();
     sheets.push({ name: 'Issues', rows: [iss.head].concat(iss.rows.map(r => r.cells)) });
     const s = P.settings;
@@ -499,5 +558,5 @@
   el('bPdf').onclick = exportPdf;
   el('bXls').onclick = exportXlsx;
 
-  window.Outputs = { drawerOpen, renderSchedule, threeOpen, draw3D: () => draw3D(false), open3D, close3D, cableRows, containRows, boqSections, isoRows, exportPdf, exportXlsx, capture3D };
+  window.Outputs = { boardRows, drawerOpen, renderSchedule, threeOpen, draw3D: () => draw3D(false), open3D, close3D, cableRows, containRows, boqSections, isoRows, exportPdf, exportXlsx, capture3D };
 })();

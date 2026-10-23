@@ -283,7 +283,7 @@
   .modal .f { grid-template-columns: 170px 1fr; }
   .basis li { font-size: 12.5px; line-height: 1.55; margin: 3px 0; color: var(--ink-soft); }
   .issues li { font-size: 12.5px; margin: 4px 0; cursor: pointer; }
-  .issues li.fail { color: var(--alarm); } .issues li.warn { color: #8a5d00; }
+  .issues li.fail { color: var(--alarm); } .issues li.warn { color: #8a5d00; } .issues li.info { color: var(--control); }
   .keys td { font-size: 12.5px; padding: 3px 10px 3px 0; } .keys td:first-child { font-family: 'Azeret Mono', monospace; white-space: nowrap; }
 
   .toast { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); background: var(--graphite); color: var(--paper); padding: 9px 16px; border-radius: 4px; font-size: 13px; z-index: 60; box-shadow: 0 4px 18px rgba(0,0,0,.25); opacity: 0; transition: opacity .2s; pointer-events: none; }
@@ -378,6 +378,7 @@
             <button data-tab="contain">Containment</button>
             <button data-tab="boq">Take-off</button>
             <button data-tab="iso">Isolators &amp; glands</button>
+            <button data-tab="boards">Boards</button>
             <button data-tab="issues">Issues</button>
           </div>
           <span id="schedNote" style="font-size:12px;color:var(--muted)"></span>

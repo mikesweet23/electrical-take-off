@@ -546,12 +546,16 @@
     return tbl[In] != null ? tbl[In] : null;
   }
   // Time to disconnect at a fault current, for the adiabatic check.
+  // Below the instantaneous trip an MCB (or an MCCB's long-time element)
+  // clears on its thermal curve; t = 200 / (I/In)² s sits on the slow edge of
+  // the BS EN 60898 band (5 s at about 6.3 × In) and is capped at 5 s.
+  function thermalTime(m) { return Math.min(5, 200 / Math.max(1, m * m)); }
   function faultTime(dev, In, If, zs, tReq) {
     if (dev.family === 'mcb') {
-      return If >= (MCB_INST[dev.curve] || 10) * In ? 0.1 : 5;
+      return If >= (MCB_INST[dev.curve] || 10) * In ? 0.1 : thermalTime(If / In);
     }
     if (dev.family === 'mccb') {
-      return If >= (dev.im || 10) * In ? 0.1 : 5;
+      return If >= (dev.im || 10) * In ? 0.1 : thermalTime(If / In);
     }
     const z04 = BS88_ZS[0.4][In];
     if (z04 != null && zs <= z04) return 0.4;
@@ -777,6 +781,57 @@
     }
     return items;
   }
+
+  // ------------------------------------------------------------------
+  // Weight and tray loading
+  // ------------------------------------------------------------------
+  // Cable weight, kg/m — an estimate from the copper and the overall
+  // diameter (the rest of the section at a typical density: higher for steel
+  // armour). Within about 15 % of Doncaster / Prysmian sheets for SWA; type a
+  // figure from the supplier when a tray is close to its limit.
+  function cableWeight(typeKey, cores, size, od, nSingles) {
+    const t = CABLE_TYPES[typeKey];
+    if (!t || !od) return 0;
+    const n = t.singles ? 1 : (t.pairs ? (cores || 1) * 2 : (cores || 1));
+    const cu = n * (Number(size) || 0) * 0.0089;
+    const rest = Math.PI * od * od / 4 * (t.armoured ? 0.0020 : 0.0013);
+    return (cu + rest) * (t.singles ? (nSingles || 1) : 1);
+  }
+  // Safe working load, kg/m, of a run at its reference support span, by
+  // width. Typical UK catalogue figures (Unitrunk / Legrand / Atkore class):
+  // check the manufacturer's load table for the chosen product.
+  const TRAY_SWL = {
+    tray: {
+      span: 1.5,
+      light: { 50: 15, 75: 15, 100: 20, 150: 25, 225: 30, 300: 35, 450: 40, 600: 45, 750: 45, 900: 45 },
+      medium: { 50: 25, 75: 30, 100: 35, 150: 45, 225: 55, 300: 65, 450: 75, 600: 85, 750: 90, 900: 95 },
+      heavy: { 50: 40, 75: 48, 100: 56, 150: 72, 225: 88, 300: 104, 450: 120, 600: 136, 750: 144, 900: 152 }
+    },
+    ladder: {
+      span: 3.0,
+      medium: { 150: 60, 300: 80, 450: 95, 600: 110, 750: 120, 900: 130 },
+      heavy: { 150: 90, 300: 120, 450: 140, 600: 165, 750: 180, 900: 195 }
+    },
+    basket: {
+      span: 1.5,
+      light: { 50: 10, 100: 15, 150: 20, 200: 25, 300: 30, 400: 35, 500: 40, 600: 45 }
+    }
+  };
+  // Load scales with the square of the span (bending, uniform load); a
+  // shorter span than the reference is not credited beyond 1.5 ×.
+  function traySwl(kind, duty, width, spanM) {
+    const t = TRAY_SWL[kind];
+    if (!t || !width) return null;
+    const row = t[duty] || t[Object.keys(t).find(k => k !== 'span')];
+    const v = row && row[width];
+    if (v == null) return null;
+    const f = Math.min(1.5, Math.pow(t.span / Math.max(0.3, spanM || t.span), 2));
+    return v * f;
+  }
+
+  // Motor cable from a drive: the longest run the drive maker allows without
+  // an output filter is usually 50 m screened (some 100–150 m).
+  const VSD_MAX_DEFAULT = 50;
 
   // ------------------------------------------------------------------
   // Sizing
@@ -1114,7 +1169,7 @@
     tabulated, mvPerAm, caFor, cgFor, cableOd, coresFor, singlesCount, cpcArea, cpcRPerM,
     zsMax, faultTime, deviceLabel, designCurrent, pickIsolator, glandFor, flexConduitFor,
     widthRequired, pickWidth, areaOf, pickTrunking, pickConduit, supportKit,
-    sizeCircuit, sizeControl, nearestStd
+    sizeCircuit, sizeControl, nearestStd, cableWeight, TRAY_SWL, traySwl, VSD_MAX_DEFAULT
   };
   root.CableEngine = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

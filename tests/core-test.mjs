@@ -38,7 +38,7 @@ function sample() {
   const cond = r1.legs[0].govCond;
   ok(cond && (cond.n === 2 || cond.n === 1), 'grouping counts circuits on the shared tray');
   ok(r1.legs[1].role === 'tail' && r1.legs[1].short === 'SY', 'tail defaults to SY flex');
-  ok(r1.device.curve === 'C', 'DOL motor defaults to Type C');
+  ok(r1.device.curve === 'C' || r1.device.curve === 'D', 'DOL motor gets a C or D curve, whichever needs less copper');
   ok(r1.In >= 1.2 * r1.start / 5, 'Type C rating raised to ride through the DOL start');
   const r2 = A.results.get('c2');
   ok(r2.device.curve === 'C', 'VSD motor defaults to Type C');
@@ -192,6 +192,112 @@ function sample() {
   const A = C.solve(P);
   const occ = A.occ.get('r1:1');
   ok(occ.length === 2, 'two circuits ride the long straight');
+}
+
+{
+  // pump room: six pumps tapping a long tray at intervals
+  const mk = () => {
+    const P = C.newProject();
+    P.sheets.push({ id: 's1', pxPerM: 50, level: 0 });
+    P.nodes.push({ id: 'b1', sheet: 's1', kind: 'board', name: 'DB1', x: 200, y: 400, h: 1.5, phase: 3 });
+    P.routes.push({ id: 'r1', sheet: 's1', name: 'CT1', type: 'tray', mount: 'droprod', layout: 'touching', pts: [{ id: 'p1', x: 250, y: 400, h: 3 }, { id: 'p2', x: 3250, y: 400, h: 3 }] });
+    for (let i = 0; i < 6; i++) {
+      const x = 900 + i * 450;
+      P.nodes.push({ id: 'l' + i, sheet: 's1', kind: 'load', name: 'P' + i, loadKind: 'pump', x, y: 600, h: 0.5, phase: 3, kw: 15 + i * 4, drive: 'DOL' });
+      P.circuits.push({ id: 'c' + i, kind: 'power', board: 'b1', target: 'l' + i, device: {}, legs: { main: {} } });
+    }
+    return C.repair(P);
+  };
+  const P = mk();
+  const A = C.solve(P);
+  const res = A.routes.get('r1');
+  ok(res.load && res.load.kg > 0 && res.load.swl > 0, 'tray load worked out (' + res.load.kg.toFixed(1) + ' of ' + res.load.swl.toFixed(0) + ' kg/m)');
+  ok(res.stepPlan && res.stepPlan.parts.length >= 2 && res.stepPlan.parts[0].width > res.stepPlan.parts[res.stepPlan.parts.length - 1].width, 'step-down plan: wider at the board end, narrower further on');
+  const before = A.results.get('c5').legs[0].lengthM;
+  const made = C.splitRoute(P, 'r1', res.stepPlan.cuts);
+  ok(made.length === res.stepPlan.cuts.length, 'run split at every step');
+  const A2 = C.solve(P);
+  near(A2.results.get('c5').legs[0].lengthM, before, 0.01, 'cable length unchanged by the split');
+  const T = C.takeoff(P, A2);
+  ok([...T.fittings.values()].some(v => v.desc === 'Reducer'), 'reducers counted where the run steps down');
+  const widths = P.routes.map(r => A2.routes.get(r.id).width);
+  ok(widths[0] > widths[widths.length - 1], 'each piece sized on its own (' + widths.join(' → ') + ' mm)');
+
+  // a heavy load on light-duty tray at wide centres fails
+  const Q = mk();
+  Q.routes[0].duty = 'light'; Q.routes[0].spacing = 3;
+  Q.nodes.filter(n => n.kind === 'load').forEach(n => { n.kw = 90; n.drive = 'SD'; });
+  const AQ = C.solve(Q);
+  ok(!AQ.routes.get('r1').load.ok && AQ.issues.some(i => /safe load/.test(i.text)), 'overloaded light-duty tray flagged (' + AQ.routes.get('r1').load.kg.toFixed(1) + ' of ' + AQ.routes.get('r1').load.swl.toFixed(0) + ' kg/m)');
+}
+
+{
+  // two tiers: control on the upper tier, no divider
+  const P = sample();
+  P.nodes.push({ id: 'bm', sheet: 's1', kind: 'board', boardKind: 'BMS', name: 'BMS1', x: 100, y: 140, h: 1.5 });
+  P.nodes.push({ id: 'fd', sheet: 's1', kind: 'device', name: 'FD1', x: 2100, y: 650, h: 1.2 });
+  P.circuits.push({ id: 'cc', kind: 'control', board: 'bm', target: 'fd', ctrl: { volts: 24, va: 10 }, device: {}, legs: { main: {} } });
+  P.routes[0].tiers = 2;
+  const A = C.solve(P);
+  const res = A.routes.get('r1');
+  ok(res.tiers === 2 && res.tier2 && res.tier2.width && !res.mixed, 'two tiers: upper tier sized, no divider needed');
+  const lay = C.edgeLayout(P, A, 'r1:1');
+  ok(lay.items.filter(x => x.tier === 2).every(x => x.band === 'I') && lay.items.filter(x => x.tier === 1).every(x => x.band === 'II'), 'power on the lower tier, control on the upper');
+  const T = C.takeoff(P, A);
+  ok([...T.contain.values()].some(v => /upper tier/.test(v.desc)), 'upper tier in the take-off');
+  ok([...T.fixings.keys()].some(k => /upper tier/.test(k)), 'upper tier supports counted');
+  ok(![...T.contain.values()].some(v => /divider/i.test(v.desc)), 'no divider on a two-tier run');
+}
+
+{
+  // fire wall: containment crossing gets a seal, a loose cable a sleeve
+  const P = sample();
+  P.firewalls = [{ id: 'w1', sheet: 's1', rating: 120, pts: [{ x: 1000, y: 0 }, { x: 1000, y: 2000 }] }];
+  P.nodes.push({ id: 'l9', sheet: 's1', kind: 'load', name: 'H1', x: 1500, y: 1500, h: 1, loadKind: 'heater', phase: 1, kw: 2 });
+  P.circuits.push({ id: 'c9', kind: 'power', board: 'b1', target: 'l9', device: {}, legs: { main: { direct: true } } });
+  const A = C.solve(P);
+  ok(A.fire.some(x => x.kind === 'contain' && x.rating === 120), 'tray crossing a 120 min wall');
+  ok(A.fire.some(x => x.kind === 'cable' && x.cid === 'c9'), 'loose cable crossing the wall');
+  const T = C.takeoff(P, A);
+  ok([...T.fire.values()].some(v => /pillow/.test(v.desc)) && [...T.fire.values()].some(v => /sleeve/.test(v.desc)), 'fire seals and sleeves in the take-off');
+  // FP200 in PVC trunking fails; on tray it gets metal ties
+  P.circuits[1].legs.main.type = 'fp200';
+  P.nodes.find(n => n.id === 'l2').phase = 1; P.nodes.find(n => n.id === 'l2').kw = 1;
+  P.routes[0].type = 'pvctrunking';
+  ok(C.solve(P).issues.some(i => /plastic containment/.test(i.text)), 'fire cable in PVC trunking flagged');
+  P.routes[0].type = 'tray';
+  const T2 = C.takeoff(P, C.solve(P));
+  ok([...T2.sundries.keys()].some(k => /Metal cable ties/.test(k)), 'metal ties for the fire cable');
+}
+
+{
+  // drive in the panel: the run is the motor cable
+  const P = sample();
+  const fan = P.nodes.find(n => n.id === 'l2');
+  fan.drivePos = 'panel'; fan.vsdMaxM = 30;
+  const A = C.solve(P);
+  const r = A.results.get('c2');
+  ok(r.vsdPanel && r.checks.some(x => x.id === 'vsdlen' && !x.ok), 'motor cable over the drive limit flagged');
+  ok(r.checks.some(x => x.id === 'emc' && !x.ok), 'unscreened SWA from a drive flagged');
+  P.circuits[1].legs.main.type = 'vsd';
+  const A2 = C.solve(P);
+  ok(A2.results.get('c2').checks.some(x => x.id === 'emc' && x.ok), 'VSD cable passes the EMC check');
+  const T = C.takeoff(P, A2);
+  ok([...T.glands.keys()].some(k => k.startsWith('EMC')), 'EMC glands for the motor cable');
+}
+
+{
+  // a big DOL motor: a D curve rides the start at a lower rating than a C
+  const P = C.newProject();
+  P.sheets.push({ id: 's1', pxPerM: 50, level: 0 });
+  P.nodes.push({ id: 'b1', sheet: 's1', kind: 'board', name: 'DB1', x: 0, y: 0, h: 1.5, phase: 3 });
+  P.nodes.push({ id: 'l1', sheet: 's1', kind: 'load', name: 'P4', x: 1500, y: 0, h: 1.5, loadKind: 'pump', phase: 3, kw: 27, drive: 'DOL' });
+  P.circuits.push({ id: 'c1', kind: 'power', board: 'b1', target: 'l1', device: {}, legs: { main: {} } });
+  const r = C.solve(P).results.get('c1');
+  ok(r.device.curve === 'D' && r.In <= 50 && r.legs[0].size <= 16, '27 kW DOL: ' + r.deviceText + ', ' + r.legs[0].size + ' mm² (overload at the starter)');
+  ok(r.izNeed < r.In, 'starter overload: cable sized to Ib, not In');
+  P.circuits[0].device.curve = 'C';
+  ok(C.solve(P).results.get('c1').device.curve === 'C', 'a chosen curve is kept');
 }
 
 console.log(fails ? fails + ' FAILED' : 'all passed');

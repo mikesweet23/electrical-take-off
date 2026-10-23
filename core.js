@@ -27,7 +27,7 @@
       defMount: 'droprod', defFinish: 'hdg', defType: 'tray', defDuty: 'medium',
       freeMethod: 'C', autoRoute: true, autoHopM: 15, trayBendR: 150, ortho: true, stackScale: 1,
       isoEnclosure: 'poly', isoIP: 'IP66', stainlessOutdoor: false, calcRev: 3,
-      segMethod: 'divider', segDividerMm: 10, segGapMm: 200
+      segMethod: 'divider', segDividerMm: 10, segGapMm: 200, tierGapMm: 300, fireRating: 60
     };
   }
   function newProject() {
@@ -35,7 +35,7 @@
       app: 'adi-cable-trace', schema: 1, rev: 0, name: 'Untitled project', ref: '', client: '',
       settings: defaultSettings(),
       sheets: [], active: null,
-      nodes: [], routes: [], circuits: [], measures: [],
+      nodes: [], routes: [], circuits: [], measures: [], firewalls: [],
       nextId: 1
     };
   }
@@ -61,6 +61,7 @@
     P.routes.forEach(r => { seen(r.id); (r.pts || []).forEach(p => seen(p.id)); });
     P.circuits.forEach(c => seen(c.id));
     P.measures.forEach(m => seen(m.id));
+    (P.firewalls || []).forEach(f => seen(f.id));
     P.nextId = Math.max(P.nextId || 1, max + 1);
     if (!P.active && P.sheets[0]) P.active = P.sheets[0].id;
     P.circuits.forEach(c => { c.legs = c.legs || {}; c.device = c.device || {}; });
@@ -438,7 +439,14 @@
   function deviceFor(c, P, ix) {
     const s = P.settings;
     const d = Object.assign({}, c.device || {});
-    if (!d.family) d.family = s.defFamily || 'mcb';
+    if (!d.family) {
+      d.family = s.defFamily || 'mcb';
+      // beyond the MCB range (or close to it) a device not chosen by hand
+      // becomes an MCCB
+      const L = ix.node.get(c.target);
+      const ib = c.kind === 'power' && L ? E.designCurrent(loadInput(L)).ib : 0;
+      if (d.family === 'mcb' && ib > 100) d.family = 'mccb';
+    }
     if (d.family === 'mcb' && !d.curve) {
       const load = ix.node.get(c.target);
       const kind = load && E.LOAD_KINDS[load.loadKind];
@@ -616,8 +624,21 @@
         } else {
           const L = ix.node.get(c.target);
           const load = L ? loadInput(L) : {};
-          load.overloadAtStarter = !!c.overloadAtStarter;
-          res = E.sizeCircuit({ kind: 'power', load, board, device: deviceFor(c, P, ix), legs }, s);
+          // DOL, star-delta and soft starters carry a motor overload relay, so
+          // unless told otherwise the cable needs only Iz ≥ Ib (433.1, 433.3)
+          const starter = L && (E.LOAD_KINDS[L.loadKind] || {}).motor && ['DOL', 'SD', 'SS'].includes(L.drive || 'DOL');
+          load.overloadAtStarter = c.overloadAtStarter != null ? !!c.overloadAtStarter : !!starter;
+          const dev0 = deviceFor(c, P, ix);
+          res = E.sizeCircuit({ kind: 'power', load, board, device: dev0, legs }, s);
+          // A started motor on an MCB with no curve chosen: try C and D and keep
+          // whichever needs less copper (a D rides a big start at a lower rating,
+          // a C allows a higher Zs on a small one).
+          if (starter && dev0.family === 'mcb' && !(c.device && c.device.curve)) {
+            const alt = E.sizeCircuit({ kind: 'power', load, board, device: Object.assign({}, dev0, { curve: dev0.curve === 'D' ? 'C' : 'D' }), legs }, s);
+            const cu = (x) => (x.legs || []).reduce((a, l) => a + (l.size || 0) * (l.lengthM || 0), 0) + (x.ok ? 0 : 1e9);
+            if (cu(alt) < cu(res) - 1e-9) res = alt;
+            res.autoCurve = true;
+          }
         }
         res.board = board;
         if (!c.board) res.checks.unshift({ ok: false, text: 'No supply — trace the cable from a board to the isolator' });
@@ -625,6 +646,17 @@
         res.ok = res.checks.every(x => x.ok || x.warn);
       }
       lps.forEach((lp, k) => { if (lp.broken && res.legs[k]) res.checks.push({ ok: false, text: (lp.role === 'tail' ? 'Tail' : 'Cable') + ' route has a gap — part of it is not joined through the containment' }); });
+      // a drive in the panel: the whole run is the motor cable
+      const Ld = c.kind === 'power' ? ix.node.get(c.target) : null;
+      if (Ld && Ld.drive === 'VSD' && (E.LOAD_KINDS[Ld.loadKind] || {}).motor && Ld.drivePos === 'panel' && res.legs && res.legs.length) {
+        res.vsdPanel = true;
+        const motorM = res.legs.reduce((a, l) => a + (l.lengthM || 0), 0);
+        const maxM = Number(Ld.vsdMaxM) > 0 ? Number(Ld.vsdMaxM) : E.VSD_MAX_DEFAULT;
+        res.motorM = motorM; res.vsdMaxM = maxM;
+        res.checks.push({ id: 'vsdlen', ok: motorM <= maxM, warn: motorM > maxM, text: 'Drive to motor ' + motorM.toFixed(0) + ' m ' + (motorM <= maxM ? '≤' : '>') + ' ' + maxM + ' m allowed by the drive' + (motorM > maxM ? ' — output filter / sine filter or move the drive' : '') });
+        const unscreened = res.legs.filter(l => l.type !== 'vsd' && l.type !== 'cy');
+        res.checks.push({ id: 'emc', ok: !unscreened.length, warn: unscreened.length > 0, text: unscreened.length ? 'Motor cable from a drive should be symmetrical screened VSD cable (or CY), screen glanded 360° at both ends — ' + unscreened.map(l => l.short).join(', ') + ' is not' : 'Screened motor cable, EMC glands both ends' });
+      }
       res.ok = res.checks.every(x => x.ok || x.warn);
       res.paths = lps;
       c._sizing = false;
@@ -642,12 +674,17 @@
       const lr = (r.legs || []).find(l => l.role === role);
       if (!lr || !lr.od) return [];
       const n = lr.singles ? (lr.nSingles || 1) : 1;
-      return Array.from({ length: n }, () => lr.od);
+      const kg = E.cableWeight(lr.type, lr.cores, lr.size, lr.od, 1);
+      const fire = lr.type === 'fp200' || lr.type === 'fp600';
+      return Array.from({ length: n }, () => ({ od: lr.od, kg, fire }));
     };
     const edgeCables = new Map();
     A.occ.forEach((list, eid) => {
       const ods = [];
-      list.forEach(o => odOf(o.cid, o.role).forEach(d => ods.push({ od: d, cid: o.cid, role: o.role, band: o.band, t0: o.t0, t1: o.t1 })));
+      const e = G.edgeById.get(eid);
+      const r = e && e.rid ? ix.route.get(e.rid) : null;
+      const tiered = r && Number(r.tiers) === 2;
+      list.forEach(o => odOf(o.cid, o.role).forEach(d => ods.push({ od: d.od, kg: d.kg, fire: d.fire, cid: o.cid, role: o.role, band: o.band, tier: tiered && o.band === 'I' ? 2 : 1, t0: o.t0, t1: o.t1 })));
       edgeCables.set(eid, ods);
     });
     A.edgeCables = edgeCables;
@@ -719,32 +756,110 @@
       return E.widthRequired(II.map(x => x.od), 0, layout === 'spaced') + E.widthRequired(I.map(x => x.od), 0, false) + sep;
     };
 
+    const kgNeed = (here) => here.reduce((a, x) => a + (x.kg || 0), 0);
     P.routes.forEach(r => {
-      let all = [];
-      let worst = [];
-      let wv = -1;
+      const edges = G.edges.filter(e => e.rid === r.id);
+      const tiered = Number(r.tiers) === 2;
       const need = widthNeed(r.layout);
-      G.edges.filter(e => e.rid === r.id).forEach(e => {
-        const list = edgeCables.get(e.id) || [];
-        const here = fullestPoint(list, need);
-        const v = need(here);
-        if (v > wv) { wv = v; worst = here; }
-        all = all.concat(list.map(x => x.od));
-      });
-      const res = sizeContainment(r.type, r.layout, worst, r.width);
-      res.mixedAnywhere = G.edges.some(e => e.rid === r.id && (edgeCables.get(e.id) || []).some(x => x.band === 'I') && (edgeCables.get(e.id) || []).some(x => x.band !== 'I'));
-      if (res.mixedAnywhere && !res.mixed) { res.mixed = true; res.seg = s.segMethod || 'divider'; }
+      // the fullest point of the run, per tier
+      const worstOf = (pick) => {
+        let worst = [], wv = -1;
+        edges.forEach(e => {
+          const list = (edgeCables.get(e.id) || []).filter(pick);
+          const here = fullestPoint(list, need);
+          const v = need(here);
+          if (v > wv) { wv = v; worst = here; }
+        });
+        return worst;
+      };
+      const all = [];
+      edges.forEach(e => (edgeCables.get(e.id) || []).forEach(x => all.push(x)));
+      const res = sizeContainment(r.type, r.layout, worstOf(x => x.tier !== 2), r.width);
+      if (tiered) {
+        res.tiers = 2;
+        res.tier2 = sizeContainment(r.type, 'touching', worstOf(x => x.tier === 2), r.width2);
+        res.mixed = false; res.seg = null;
+      } else {
+        res.mixedAnywhere = edges.some(e => (edgeCables.get(e.id) || []).some(x => x.band === 'I') && (edgeCables.get(e.id) || []).some(x => x.band !== 'I'));
+        if (res.mixedAnywhere && !res.mixed) { res.mixed = true; res.seg = s.segMethod || 'divider'; }
+      }
       // large cables will not take a standard tray bend (minimum internal
       // radius about 8 × D for armoured cable): ladder with large-radius bends
-      res.maxOd = all.length ? Math.max(...all) : 0;
+      res.maxOd = all.length ? Math.max(...all.map(x => x.od)) : 0;
       res.bendR = res.maxOd * 8;
       res.bendWarn = (r.type === 'tray' || r.type === 'basket' || r.type === 'trunking' || r.type === 'pvctrunking') && res.bendR > (Number(s.trayBendR) || 150);
       res.circuits = new Set();
-      G.edges.filter(e => e.rid === r.id).forEach(e => (A.occ.get(e.id) || []).forEach(o => res.circuits.add(o.cid)));
+      edges.forEach(e => (A.occ.get(e.id) || []).forEach(o => res.circuits.add(o.cid)));
       res.nCircuits = res.circuits.size;
-      res.maxGrouped = Math.max(0, ...G.edges.filter(e => e.rid === r.id).map(e => powerCount(e.id, 0, 1)));
+      res.maxGrouped = Math.max(0, ...edges.map(e => powerCount(e.id, 0, 1)));
+      // tray loading: cable weight at the heaviest point against the safe
+      // working load at this run's support spacing
+      const C0 = E.CONTAINMENT[r.type] || {};
+      const duty = C0.duties && C0.duties[r.duty] ? r.duty : C0.defaultDuty;
+      const span = Number(r.spacing) > 0 ? Number(r.spacing) : (s.spacing[r.type] || 1.5);
+      const loadOf = (tier, w) => {
+        let kg = 0;
+        edges.forEach(e => {
+          const list = (edgeCables.get(e.id) || []).filter(x => (x.tier || 1) === tier);
+          kg = Math.max(kg, kgNeed(fullestPoint(list, kgNeed)));
+        });
+        const swl = E.traySwl(r.type, duty, w, span);
+        return { kg, swl, ok: swl == null || kg <= swl + 1e-9, pct: swl ? kg / swl * 100 : null };
+      };
+      res.load = loadOf(1, res.width);
+      if (tiered) res.tier2.load = loadOf(2, res.tier2.width);
+      // fire-resistant cables and escape routes need metal supports throughout
+      res.fire = all.some(x => x.fire);
+      res.escape = !!r.escape;
+      res.plastic = r.type === 'pvctrunking' || r.type === 'pvcconduit';
+      res.stepPlan = stepPlan(r, edges, res);
       A.routes.set(r.id, res);
     });
+
+    // Where a run could step down a size: the standard width needed along
+    // the run, and the stretches (fed from either end) that need less than
+    // the size chosen. Only for an automatic width.
+    function stepPlan(r, edges, res) {
+      const C0 = E.CONTAINMENT[r.type] || {};
+      if (C0.fill !== 'width' || r.width || !res.width || Number(r.tiers) === 2) return null;
+      const need = widthNeed(r.layout);
+      const prof = [];
+      let dist = 0;
+      edges.slice().sort((a, b) => a.i - b.i).forEach(e => {
+        const list = (edgeCables.get(e.id) || []).filter(x => x.tier !== 2);
+        const ts = [...new Set(list.flatMap(x => [x.t0, x.t1]).concat([0, 1]))].sort((p, q) => p - q);
+        for (let k = 0; k < ts.length - 1; k++) {
+          const a0 = ts[k], a1 = ts[k + 1];
+          if (a1 - a0 < 1e-9) continue;
+          const m = (a0 + a1) / 2;
+          const here = list.filter(x => x.t0 <= m + 1e-9 && x.t1 >= m - 1e-9);
+          let w = E.pickWidth(r.type, need(here) * (1 + (Number(s.spare) || 0) / 100));
+          if (!w) w = res.width;
+          const len = e.len * (a1 - a0);
+          prof.push({ i: e.i, t0: a0, t1: a1, w, s0: dist, s1: dist + len, len });
+          dist += len;
+        }
+      });
+      if (prof.length < 2) return null;
+      const env = (arr) => { let m = 0; return arr.map(p => (m = Math.max(m, p.w))); };
+      const fwd = env(prof.slice().reverse()).reverse();   // fed from the start
+      const bwd = env(prof);                                // fed from the end
+      const saving = (e2) => prof.reduce((a, p, k) => a + (e2[k] < res.width ? p.len : 0), 0);
+      const sF = saving(fwd), sB = saving(bwd);
+      const envUse = sF >= sB ? fwd : bwd;
+      const savingM = Math.max(sF, sB);
+      if (savingM < 1) return null;
+      const parts = [];
+      prof.forEach((p, k) => {
+        const w = envUse[k];
+        const last = parts[parts.length - 1];
+        if (last && last.width === w) { last.to = p.s1; last.endI = p.i; last.endT = p.t1; }
+        else parts.push({ width: w, from: p.s0, to: p.s1, i: p.i, t: p.t0, endI: p.i, endT: p.t1 });
+      });
+      if (parts.length < 2) return null;
+      return { parts, savingM, cuts: parts.slice(1).map(p => ({ i: p.i, t: p.t, at: p.from, width: p.width })) };
+    }
+
     // risers size the same way, per riser name
     A.risers = new Map();
     G.edges.filter(e => e.riser).forEach(e => {
@@ -773,9 +888,85 @@
       else if (!res.okSpare) A.issues.push({ sev: 'warn', route: rid, text: (r.name || rid) + ': less than the ' + s.spare + ' % spare allowance' });
       if (res.mixed && (r.type === 'conduit' || r.type === 'pvcconduit')) A.issues.push({ sev: 'fail', route: rid, text: (r.name || rid) + ': power and control / data cables in the same conduit — segregate them (528.1)' });
       else if (res.mixed && res.seg === 'separate') A.issues.push({ sev: 'warn', route: rid, text: (r.name || rid) + ': power and control / data share this run — move the Band I cables to their own containment (528.1)' });
+      if (res.fire && res.plastic) A.issues.push({ sev: 'fail', route: rid, text: (r.name || rid) + ': fire-resistant cables in plastic containment — support them with metal (521.10.202, BS 5839-1)' });
+      else if (res.escape && res.plastic) A.issues.push({ sev: 'warn', route: rid, text: (r.name || rid) + ': plastic containment on an escape route needs metal fixings so it cannot collapse in a fire (521.10.202)' });
+      [res.load, res.tier2 && res.tier2.load].forEach((ld, k) => { if (ld && !ld.ok) A.issues.push({ sev: 'fail', route: rid, text: (r.name || rid) + (k ? ' upper tier' : '') + ': cable load ' + ld.kg.toFixed(1) + ' kg/m over the ' + ld.swl.toFixed(0) + ' kg/m safe load at ' + (Number(r.spacing) || s.spacing[r.type]) + ' m centres — closer supports or heavier duty' }); });
+      if (res.stepPlan) A.issues.push({ sev: 'info', route: rid, text: (r.name || rid) + ': could step down — ' + res.stepPlan.parts.map(p => p.width + ' mm for ' + (p.to - p.from).toFixed(1) + ' m').join(', then ') });
       if (res.bendWarn) A.issues.push({ sev: 'warn', route: rid, text: (r.name || rid) + ': carries a ' + res.maxOd.toFixed(1) + ' mm cable needing about ' + Math.round(res.bendR) + ' mm bend radius — use ladder with large-radius bends' });
     });
+    // fire stopping where containment and cables cross a fire-rated wall
+    A.fire = fireCrossings(P, A);
     return A;
+  }
+
+  function segCross(p1, p2, q1, q2) {
+    const d = (p2.x - p1.x) * (q2.y - q1.y) - (p2.y - p1.y) * (q2.x - q1.x);
+    if (Math.abs(d) < 1e-9) return null;
+    const t = ((q1.x - p1.x) * (q2.y - q1.y) - (q1.y - p1.y) * (q2.x - q1.x)) / d;
+    const u = ((q1.x - p1.x) * (p2.y - p1.y) - (q1.y - p1.y) * (p2.x - p1.x)) / d;
+    if (t < -1e-9 || t > 1 + 1e-9 || u < -1e-9 || u > 1 + 1e-9) return null;
+    return { x: p1.x + t * (p2.x - p1.x), y: p1.y + t * (p2.y - p1.y), t };
+  }
+  function fireCrossings(P, A) {
+    const out = [];
+    const walls = P.firewalls || [];
+    if (!walls.length) return out;
+    const each = (sheet, a, b, fn) => walls.forEach(w => {
+      if (w.sheet !== sheet) return;
+      for (let i = 1; i < w.pts.length; i++) { const x = segCross(a, b, w.pts[i - 1], w.pts[i]); if (x) fn(x, w); }
+    });
+    A.G.edges.forEach(e => {
+      if (!e.rid || e.plan < 1e-6) return;
+      const r = A.ix.route.get(e.rid);
+      const pa = A.G.nodes.get(e.a), pb = A.G.nodes.get(e.b);
+      each(r.sheet, pa, pb, (x, w) => out.push({ kind: 'contain', rid: r.id, x: x.x, y: x.y, sheet: r.sheet, rating: Number(w.rating) || P.settings.fireRating || 60, wall: w.id }));
+    });
+    P.circuits.forEach(c => {
+      const res = A.results.get(c.id);
+      (res && res.paths || []).forEach((lp, k) => lp.spans.forEach(sp => {
+        if (sp.edge || sp.from.sheet !== sp.to.sheet) return;
+        const lr = (res.legs || [])[k] || {};
+        each(sp.from.sheet, sp.from, sp.to, (x, w) => out.push({ kind: 'cable', cid: c.id, role: lp.role, od: lr.od, x: x.x, y: x.y, sheet: sp.from.sheet, rating: Number(w.rating) || P.settings.fireRating || 60, wall: w.id }));
+      }));
+    });
+    return out;
+  }
+
+  // Split a run at the given cuts ({i: edge index, t: 0..1 along it}) into
+  // separate runs joined end to end, each sized on its own. Cable waypoints
+  // keep their point ids, so the cables stay on.
+  function splitRoute(P, rid, cuts) {
+    const r = P.routes.find(x => x.id === rid);
+    if (!r || !cuts.length) return [];
+    // place every cut on the run as it was, then insert in order along it
+    const orig = r.pts.slice();
+    const at = [];
+    cuts.slice().sort((a, b) => a.i - b.i || a.t - b.t).forEach(cu => {
+      const a = orig[cu.i - 1], b = orig[cu.i];
+      if (!a || !b) return;
+      if (cu.t <= 1e-6) { at.push(r.pts.indexOf(a)); return; }
+      if (cu.t >= 1 - 1e-6) { at.push(r.pts.indexOf(b)); return; }
+      const np = { id: nid(P, 'p'), x: a.x + (b.x - a.x) * cu.t, y: a.y + (b.y - a.y) * cu.t, h: (a.h || 0) + ((b.h || 0) - (a.h || 0)) * cu.t };
+      const k = r.pts.indexOf(b);
+      r.pts.splice(k, 0, np);
+      at.push(k);
+    });
+    const idxs = [...new Set(at)].filter(k => k > 0 && k < r.pts.length - 1).sort((a, b) => a - b);
+    if (!idxs.length) return [];
+    const all = r.pts;
+    const bounds = [0].concat(idxs, [all.length - 1]);
+    const made = [];
+    r.pts = all.slice(0, bounds[1] + 1);
+    r.width = null;
+    for (let k = 1; k < bounds.length - 1; k++) {
+      const from = all[bounds[k]];
+      const piece = Object.assign({}, r, { id: nid(P, 'r'), name: (r.name || 'R') + String.fromCharCode(97 + k), width: null, pts: [] });
+      piece.pts.push({ id: nid(P, 'p'), x: from.x, y: from.y, h: from.h, link: 'p:' + from.id });
+      all.slice(bounds[k] + 1, bounds[k + 1] + 1).forEach(p => piece.pts.push(p));
+      P.routes.push(piece);
+      made.push(piece.id);
+    }
+    return made;
   }
 
   // Band I: extra-low voltage control, data and signal. Band II: LV power.
@@ -811,6 +1002,19 @@
     list.sort((a, b) => (order.get(a.cid) - order.get(b.cid)) || (a.role < b.role ? -1 : 1));
     const W = res ? res.drawMm : 100;
     const spaced = r && r.layout === 'spaced';
+    if (res && res.tiers === 2) {
+      // two tiers: power on the lower, control and data on the upper, each
+      // packed from its centre; the plan draws the upper tier beside the lower
+      const W2 = res.tier2 ? res.tier2.drawMm : 100;
+      const items = [];
+      [[list.filter(x => x.tier !== 2), 1], [list.filter(x => x.tier === 2), 2]].forEach(([arr, tier]) => {
+        const ln = (x) => x.od + (tier === 1 && spaced ? 2 * x.od : 0);
+        const total = arr.reduce((a, x) => a + ln(x), 0) - (tier === 1 && spaced && arr.length ? 2 * arr[arr.length - 1].od : 0);
+        let pos = -total / 2;
+        arr.forEach(x => { items.push(Object.assign({}, x, { off: pos + x.od / 2, tier })); pos += ln(x); });
+      });
+      return { items, divider: null, W, W2, tiers: 2 };
+    }
     const lane = (x) => x.od + (spaced && x.band !== 'I' ? 2 * x.od : 0);
     const II = list.filter(x => x.band !== 'I'), I = list.filter(x => x.band === 'I');
     const items = [];
@@ -965,16 +1169,22 @@
       const f = fits.get(r.id) || {};
       const names = FITTING_NAMES[r.type] || {};
       let nFit = 0;
-      Object.keys(f).forEach(k => {
-        if (!f[k] || !names[k]) return;
-        nFit += f[k];
-        addTo(fittings, [names[k], sizeLabel, finish].join('|'), f[k], { desc: names[k], size: sizeLabel, finish: E.FINISHES[finish] || finish });
+      // the upper tier of a two-tier run is a second run of its own size,
+      // with the same fittings
+      const sizes = [sizeLabel].concat(res.tiers === 2 && res.tier2 ? [res.tier2.size || '—'] : []);
+      if (res.tiers === 2 && res.tier2) addTo(contain, [r.type, res.tier2.size, duty, finish, 'upper'].join('|'), lens.total, { desc: C.label + ' (upper tier — control / data)', size: res.tier2.size, duty: dutyLabel, finish: E.FINISHES[finish] || finish, stockM: C.stockM });
+      sizes.forEach((sz, ti) => {
+        Object.keys(f).forEach(k => {
+          if (!f[k] || !names[k]) return;
+          if (!ti) nFit += f[k];
+          addTo(fittings, [names[k], sz, finish].join('|'), f[k], { desc: names[k], size: sz, finish: E.FINISHES[finish] || finish });
+        });
+        if (C.stockM && r.type !== 'cleats') {
+          const lengths = Math.ceil(lens.total * wasteK / C.stockM);
+          const joints = Math.max(0, lengths - 1) + Object.keys(f).reduce((a, k) => a + (names[k] ? f[k] : 0), 0) * 2;
+          if (names.joint) addTo(fittings, [names.joint, sz, finish].join('|'), joints, { desc: names.joint, size: sz, finish: E.FINISHES[finish] || finish });
+        }
       });
-      if (C.stockM && r.type !== 'cleats') {
-        const lengths = Math.ceil(lens.total * wasteK / C.stockM);
-        const joints = Math.max(0, lengths - 1) + nFit * 2;
-        if (names.joint) addTo(fittings, [names.joint, sizeLabel, finish].join('|'), joints, { desc: names.joint, size: sizeLabel, finish: E.FINISHES[finish] || finish });
-      }
       // supports along the horizontal, wall fixings up the vertical
       const spacing = Number(r.spacing) > 0 ? Number(r.spacing) : (s.spacing[r.type] || 1.5);
       const mount = r.mount || (r.type.includes('conduit') ? 'saddle' : r.type === 'cleats' ? 'cleat' : s.defMount);
@@ -997,6 +1207,15 @@
           E.supportKit(r.type.includes('conduit') ? 'saddle' : 'wallbracket', r.type, res.width, 0).forEach(it => addTo(fixings, it.item + '|' + it.unit, it.qty * n, { desc: it.item, unit: it.unit }));
         }
       });
+      // the upper tier hangs from the same supports: one more trapeze (or arm)
+      // on each, and drop rods that reach the lower tier
+      if (res.tiers === 2 && res.tier2 && supports) {
+        const w2 = res.tier2.width || res.width;
+        const per = mount === 'droprod' || mount === 'beamclamp' ? [['41×41 unistrut channel (trapeze, upper tier)', (w2 + 150) / 1000, 'm'], ['M10 channel nut + washer', 2, 'nr'], ['M10 threaded drop rod', 2 * (Number(s.tierGapMm) || 300) / 1000, 'm']]
+          : mount === 'cantilever' ? [['Unistrut cantilever arm ' + (E.UNISTRUT_ARMS.find(a => a >= w2) || 750) + ' mm (upper tier)', 1, 'nr'], ['M10 channel nut + set screw', 2, 'nr']]
+          : [['Wall support bracket ' + w2 + ' mm (upper tier)', 1, 'nr'], ['M8 wall anchor', 2, 'nr']];
+        per.forEach(([item, q, unit]) => addTo(fixings, item + '|' + unit, q * supports, { desc: item, unit }));
+      }
       // one support at each fitting
       if (nFit && mount !== 'cleat') {
         E.supportKit(mount, r.type, res.width, Math.max(0.1, soffit - s.containHeight)).forEach(it => addTo(fixings, it.item + '|' + it.unit, it.qty * nFit, { desc: it.item, unit: it.unit }));
@@ -1050,12 +1269,15 @@
           if (n && n.kind === 'riser') return;
           if (t.armoured) {
             let type = outdoorAt(endId) ? (s.glandOutdoor || 'CW') : (s.cwIndoors ? 'CW' : (s.glandIndoor || 'BW'));
-            if (lr.type === 'vsd') type = 'EMC';
+            if (lr.type === 'vsd' || r.vsdPanel) type = 'EMC';
             if (leg.gland && leg.gland !== 'auto') type = leg.gland;
             const g = E.glandFor(lr.od, true);
             addTo(glands, type + ' ' + g, 1, { desc: type + ' gland ' + g, type, size: g });
             if (s.shrouds) addTo(glands, 'Shroud ' + g, 1, { desc: 'PVC / LSF shroud ' + g, type: 'Shroud', size: g });
             if (s.earthTags) addTo(glands, 'Earth tag ' + g, 1, { desc: 'Earth tag ' + g, type: 'Earth tag', size: g });
+          } else if (r.vsdPanel || lr.type === 'cy') {
+            const g = E.glandFor(lr.od, false);
+            addTo(glands, 'EMC brass ' + g, 1, { desc: 'EMC brass gland (360° screen) ' + g, type: 'EMC', size: g });
           } else {
             const g = E.glandFor(lr.od, false);
             addTo(glands, 'Nylon ' + g, 1, { desc: 'Nylon compression gland IP68 ' + g, type: 'Nylon', size: g });
@@ -1074,18 +1296,51 @@
     P.nodes.filter(n => n.kind === 'device').forEach(n => addTo(field, n.devKind || 'device', 1, { desc: n.devKind || 'Field device' }));
 
     // cable ties per metre of tray / ladder (one every 300 mm per run of cables is overkill — one per 600 mm per cable)
-    let ties = 0;
+    let ties = 0, mties = 0;
     A.edgeCables.forEach((list, eid) => {
       const e = A.G.edgeById.get(eid);
       if (!e) return;
       const r = e.rid ? ix.route.get(e.rid) : null;
       const kind = r ? r.type : 'tray';
-      if (kind === 'tray' || kind === 'ladder' || kind === 'basket') ties += Math.ceil(e.len / 0.6) * Math.max(1, Math.ceil(list.length / 3));
-      if (kind === 'ladder' && e.dh > 0.05) ties += 0;
+      if (!(kind === 'tray' || kind === 'ladder' || kind === 'basket')) return;
+      // fire-resistant cables, and everything on an escape route, are held
+      // with metal ties so nothing drops in a fire (521.10.202)
+      const metalAll = r && r.escape;
+      const fireN = metalAll ? list.length : list.filter(x => x.fire).length;
+      const rest = list.length - fireN;
+      const per = Math.ceil(e.len / 0.6);
+      if (rest) ties += per * Math.max(1, Math.ceil(rest / 3));
+      if (fireN) mties += per * Math.max(1, Math.ceil(fireN / 3));
     });
     if (ties) addTo(sundries, 'Cable ties (UV stable)', ties, { desc: 'Cable ties, UV stable, one per 600 mm per bundle of three', unit: 'nr' });
+    if (mties) addTo(sundries, 'Metal cable ties / fire-rated clips', mties, { desc: 'Stainless or coated-steel cable ties / fire clips (fire cables and escape routes)', unit: 'nr' });
+    // fire-resistant cables clipped direct: metal clips every 300 mm
+    P.circuits.forEach(c => {
+      const r = A.results.get(c.id);
+      (r && r.paths || []).forEach((lp, k) => {
+        const lr = (r.legs || [])[k];
+        if (!lr || !(lr.type === 'fp200' || lr.type === 'fp600')) return;
+        const free = lp.spans.filter(sp => !sp.edge).reduce((a, sp) => a + sp.len, 0);
+        if (free > 0.1) addTo(sundries, 'Fire-rated cable clips ' + (E.glandFor(lr.od, false)), Math.ceil(free / 0.3), { desc: 'Fire-rated (metal) cable clips for ' + lr.short + ' Ø' + lr.od.toFixed(1) + ' mm, 300 mm centres', unit: 'nr' });
+      });
+    });
 
-    return { cables, contain, fittings, fixings, isolators, glands, flex, devices, field, sundries, fits };
+    // fire stopping at fire-rated walls
+    const fire = new Map();
+    (A.fire || []).forEach(x => {
+      if (x.kind === 'contain') {
+        const r = ix.route.get(x.rid); const res = A.routes.get(x.rid) || {};
+        const Cx = E.CONTAINMENT[r.type] || {};
+        const what = Cx.fill === 'conduit' ? 'Intumescent conduit seal' : Cx.fill === 'area' ? 'Trunking fire barrier + intumescent seal' : 'Fire batt / intumescent pillow seal';
+        const sizes = [res.size || '—'].concat(res.tiers === 2 && res.tier2 ? [res.tier2.size] : []);
+        sizes.forEach(sz => addTo(fire, [what, Cx.label, sz, x.rating].join('|'), 1, { desc: what + ' — ' + Cx.label + ' ' + sz, rating: x.rating + ' min', unit: 'nr' }));
+      } else {
+        const sz = x.od ? (x.od <= 12 ? 'up to 12 mm' : x.od <= 25 ? '12–25 mm' : x.od <= 40 ? '25–40 mm' : 'over 40 mm') : '—';
+        addTo(fire, ['Intumescent cable sleeve / collar', sz, x.rating].join('|'), 1, { desc: 'Intumescent cable sleeve / collar, cable Ø ' + sz, rating: x.rating + ' min', unit: 'nr' });
+      }
+    });
+
+    return { cables, contain, fittings, fixings, isolators, glands, flex, devices, field, sundries, fire, fits };
   }
 
   function isolatorSpec(P, A, n) {
@@ -1109,7 +1364,7 @@
     return { rating, poles: pick.poles, aux: pick.aux, enclosure, ip, fused, duty: pick.duty, text, warn, circuit: c ? c.id : null };
   }
 
-  const api = { defaultSettings, newProject, nid, repair, index, buildGraph, shortestPath, nearestGraphNode, autoRoute, autoPath, taps, edgeLayout, bandOf, maxCover, legEnds, legPath, ptPos, rootOf, pxPerM, sheetLevel, solve, takeoff, isolatorSpec, routeFittings, routeLengths, deviceFor, legType, loadInput, FITTING_NAMES };
+  const api = { splitRoute, fireCrossings, defaultSettings, newProject, nid, repair, index, buildGraph, shortestPath, nearestGraphNode, autoRoute, autoPath, taps, edgeLayout, bandOf, maxCover, legEnds, legPath, ptPos, rootOf, pxPerM, sheetLevel, solve, takeoff, isolatorSpec, routeFittings, routeLengths, deviceFor, legType, loadInput, FITTING_NAMES };
   root.CableCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -53,6 +53,12 @@ cdnjs (the same build Pipe Trace uses); images open without it.
    condition is passed to the engine; **the worst one governs**.
 3. **Device.** Smallest rating ≥ Ib, and for DOL / star-delta / soft start on
    an MCB, the curve's no-trip threshold must clear 1.2 × the starting current.
+   A device not chosen by hand becomes an MCCB above 100 A. A started motor on
+   an MCB with no curve chosen is sized on both C and D and keeps whichever
+   needs less copper (`res.autoCurve`); those starters carry an overload relay,
+   so `overloadAtStarter` defaults on for them (Iz ≥ Ib). Below the
+   instantaneous trip the CPC check uses a thermal clearing time
+   t = min(5, 200 / (I/In)²) s.
    DOL / star-delta / soft-start motors default to Type C (`motorCurve`; a
    file from before `calcRev` 2 carrying the old 'D' default is moved to C;
    before `calcRev` 3 a default Zdb of 0.35 Ω is moved to 0.2 Ω),
@@ -77,6 +83,33 @@ Sub-mains (board → board) roll up their design current from everything the
 child board feeds (× its diversity). The child board's Zdb, upstream volt drop
 and fault level then come from the sub-main unless typed on the board.
 
+### Containment checks and planning
+
+- **Tray loading.** `E.cableWeight()` estimates kg/m from the copper and the
+  overall diameter; the heaviest point of each run (per tier) is checked
+  against `E.traySwl()` — typical catalogue safe loads at a reference span,
+  scaled by (reference / actual spacing)². Fails go to the issues list.
+- **Stepping down.** `stepPlan()` walks the run, works out the standard width
+  needed on every stretch, and (fed from whichever end saves more) proposes the
+  pieces. "Split the run and step down" calls `C.splitRoute()`, which inserts
+  points at the cuts and makes joined runs; cable waypoints keep their point
+  ids so nothing moves, and reducers are counted at the joins.
+- **Two tiers.** `route.tiers = 2` puts Band I on an upper tier
+  (`tierGapMm` above), sized on its own (`res.tier2`, override `width2`): no
+  divider, a second containment line, fittings and trapeze / arms in the
+  take-off. The plan draws the upper tier beside the lower, dashed.
+- **Fire.** `P.firewalls` (tool `W`, a line with a rating) — `fireCrossings()`
+  finds every run and loose cable crossing one: seals and sleeves in the
+  take-off (`TK.fire`). FP200 / FP600 on plastic containment fails; an
+  `escape` run on plastic warns (521.10.202); fire cables and escape routes get
+  metal ties, and fire cables clipped direct get fire-rated clips.
+- **Drives.** A VSD load with `drivePos: 'panel'` makes the whole circuit the
+  motor cable: checked against `vsdMaxM` (default 50 m), warned if not VSD or
+  CY cable, and glanded EMC at both ends.
+- **Board schedules** (`Outputs.boardRows()`): way, device, cable, CPC, Iz,
+  VD, design and maximum Zs, and maximum measured Zs (× 0.8) — in the drawer,
+  the PDF and the Excel workbook.
+
 ## 3. Data — what is exact and what is typical
 
 Entered by hand from the 18th Edition; check against your copy after any edit:
@@ -99,6 +132,8 @@ Entered by hand from the 18th Edition; check against your copy after any edit:
 - Conduit fill uses a space factor (default 40 %) rather than the OSG cable
   factor tables; trunking uses the OSG 45 %.
 - Support spacings and the per-support kits in `supportKit()`.
+- Cable weights (`cableWeight`, an estimate) and tray safe loads (`TRAY_SWL`).
+- The default drive motor-cable limit (50 m) — take it from the drive data.
 
 Every value is also overrideable where it matters on a job: the diameter per
 leg, Zdb / PFC / upstream VD per board, widths per run, spacing per run.
@@ -118,6 +153,10 @@ leg, Zdb / PFC / upstream VD per board, widths per run, spacing per run.
 | `legs.main/tail` | `type, cpc, cores, step, extra, way[], direct, freeMethod, ci, flex, gland, od` |
 | `way[]` | `{p: pid}` a containment point, `{r: nodeId}` a riser, `{s, x, y, h}` a free point |
 | `measures[]` | Tape lines, plan only |
+| `firewalls[]` | `id, sheet, name, rating (min), pts[]` — fire-rated walls / floors |
+
+Routes also carry `tiers`, `width2` and `escape`; loads `drivePos` and
+`vsdMaxM`.
 
 `repair()` makes an old or hand-edited file safe to open: missing keys,
 settings merged over defaults, and the id counter moved past every id in use.

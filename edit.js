@@ -50,6 +50,7 @@ function turnPoints(sid, deg, cOld, cNew) {
   P.nodes.forEach(n => { if (n.sheet === sid) t(n); });
   P.routes.forEach(r => { if (r.sheet === sid) r.pts.forEach(t); });
   P.measures.forEach(m => { if (m.sheet === sid) m.pts.forEach(t); });
+  (P.firewalls || []).forEach(f => { if (f.sheet === sid) f.pts.forEach(t); });
   P.circuits.forEach(c => Object.values(c.legs || {}).forEach(l => (l.way || []).forEach(w => { if (w.s === sid) t(w); })));
 }
 async function rotateSheet(deg) {
