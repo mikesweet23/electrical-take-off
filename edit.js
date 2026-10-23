@@ -237,7 +237,7 @@ function multiForm(m) {
   const kinds = {};
   nodes.forEach(n => { kinds[n.kind] = (kinds[n.kind] || 0) + 1; });
   const words = Object.keys(kinds).map(k => kinds[k] + ' ' + k + (kinds[k] > 1 ? 's' : '')).concat(routes.length ? [routes.length + ' containment run' + (routes.length > 1 ? 's' : '')] : [], m.measures.length ? [m.measures.length + ' tape'] : []);
-  let h = '<div class="insp-hd"><div style="min-width:0;flex:1"><div class="kind">Selection</div><h3>' + multiCount(m) + ' items</h3></div><button class="btn ghost sm" data-act="close">✕</button></div><div class="insp-bd">';
+  let h = hd('Selection', multiCount(m) + ' items') + '<div class="insp-bd">';
   h += '<p class="note">' + esc(words.join(', ')) + '</p>';
   h += '<p class="note">Drag any picked item to move them all. Arrow keys nudge 50 mm (Shift 500 mm). Shift-click adds or removes one.</p>';
   h += '<h4>Set for all</h4>';

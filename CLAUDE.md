@@ -35,9 +35,15 @@ cdnjs (the same build Pipe Trace uses); images open without it.
    points it follows the shortest path through the containment; anything else
    is a free span. Length = plan + vertical for every span (risers and drops are
    counted, never the hypotenuse), plus `termAllow` at each end, plus the leg's
-   `extra`. A main leg with no waypoints is auto-routed (`autoRoute()`): one
-   Dijkstra seeded from every containment point within `autoHopM` of the start,
-   with off-containment metres costing double.
+   `extra`. A main leg with no waypoints is auto-routed (`autoPath()`): the
+   equipment joins and leaves the containment at a **tap** — the foot of the
+   perpendicular on any run within `autoHopM`, not only a corner — so a pump
+   under the middle of a tray drops from the point above it. One Dijkstra
+   seeded from every start tap, off-containment metres costing double. A
+   partial edge carries `t0`/`t1`, and the plan and 3D draw the cable on that
+   stretch only (grouping and fill still count the whole piece). A leg with
+   nothing traced and nothing to ride on is costed square to the building
+   (|dx| + |dy|), never diagonally across a room.
 2. **Grouping.** `A.occ` lists every circuit on every piece (edge) of
    containment. Cg for a leg is taken per edge from the number of *power*
    circuits on it (control and data are not counted — Table 4C1 note on lightly
@@ -45,7 +51,9 @@ cdnjs (the same build Pipe Trace uses); images open without it.
    condition is passed to the engine; **the worst one governs**.
 3. **Device.** Smallest rating ≥ Ib, and for DOL / star-delta / soft start on
    an MCB, the curve's no-trip threshold must clear 1.2 × the starting current.
-   Motors default to Type D unless on a VSD.
+   DOL / star-delta / soft-start motors default to Type C (`motorCurve`; a
+   file from before `calcRev` 2 carrying the old 'D' default is moved to C),
+   with the rating raised until the start clears.
 4. **Cable.** Smallest size with Iz ≥ In under every condition (Iz ≥ Ib when
    "overload at starter" is ticked), never below `minPower` (Table 52.3). Then
    upsize the leg doing most harm until the total volt drop (including the
@@ -129,6 +137,11 @@ settings merged over defaults, and the id counter moved past every id in use.
 - **Undo** is snapshots of the take-off without drawing images. `pushUndo()`
   goes before the change.
 - Refs (`DB1/3`) are automatic until typed (`refAuto: false`).
+- **Inspector buttons act on pointerdown** and commit the field being typed
+  in first (`commitActiveField()`), because a field commits on change, and
+  the re-render that change causes would otherwise swallow the click. Done
+  closes the panel; Duplicate copies the selection beside itself (from a cable
+  it copies the load and isolator, and the cable comes with them).
 - **Rotating a sheet bakes the turn into the image** and turns every traced
   point on that sheet with it (nodes, run points, free cable waypoints, tape)
   about the sheet centre, landing on the new canvas centre. Each turn is drawn

@@ -493,7 +493,10 @@ function render() {
       off += w;
       const c = circById(cb.cid);
       if (!c) return;
-      const x1 = pa.x + nx * o, y1 = pa.y + ny * o, x2 = pb.x + nx * o, y2 = pb.y + ny * o;
+      // only the stretch of this piece the cable actually rides
+      const t0 = cb.t0 != null ? cb.t0 : 0, t1 = cb.t1 != null ? cb.t1 : 1;
+      const ax = pa.x + (pb.x - pa.x) * t0, ay = pa.y + (pb.y - pa.y) * t0, bx = pa.x + (pb.x - pa.x) * t1, by = pa.y + (pb.y - pa.y) * t1;
+      const x1 = ax + nx * o, y1 = ay + ny * o, x2 = bx + nx * o, y2 = by + ny * o;
       const sel = selC === c.id;
       const res2 = A.results.get(c.id);
       const bad = res2 && !res2.ok;
@@ -1249,11 +1252,20 @@ function renderInspector() {
   else if (k === 'route') h = routeForm(o);
   else if (k === 'circ') h = circForm(o);
   else if (k === 'multi') h = multiForm(o);
-  else if (k === 'measure') h = '<div class="insp-hd"><div><div class="kind">Tape</div><h3>' + fmt(measureLen(o), 2) + ' m</h3></div><button class="btn ghost sm" data-act="close">✕</button></div><div class="insp-bd"><p class="note">A plan measurement only — not counted in the take-off.</p><div class="insp-actions"><button class="btn danger sm" data-act="delete">Delete</button></div></div>';
+  else if (k === 'measure') h = '' + hd('Tape', fmt(measureLen(o), 2) + ' m') + '<div class="insp-bd"><p class="note">A plan measurement only — not counted in the take-off.</p><div class="insp-actions"><button class="btn danger sm" data-act="delete">Delete</button></div></div>';
   box.innerHTML = h;
 }
 function hd(kind, title) {
-  return '<div class="insp-hd"><div style="min-width:0;flex:1"><div class="kind">' + esc(kind) + '</div><h3>' + esc(title) + '</h3></div><button class="btn ghost sm" data-act="close" title="Close (Esc)">✕</button></div>';
+  return '<div class="insp-hd"><div style="min-width:0;flex:1"><div class="kind">' + esc(kind) + '</div><h3>' + esc(title) + '</h3></div>'
+    + '<button class="btn ghost sm" data-act="dup" title="Duplicate beside the original (Ctrl+D)">Duplicate</button>'
+    + '<button class="btn go sm" data-act="done" title="Apply the changes and close (Enter applies a field too)">Done</button></div>';
+}
+// The field being typed in only commits on change (blur or Enter). A button
+// press commits it first, so Done and Duplicate never lose an edit.
+function commitActiveField() {
+  const f = document.activeElement;
+  if (!f || !el('insp').contains(f) || !f.dataset || !f.dataset.o) return;
+  if (f.tagName === 'INPUT' && f.type !== 'checkbox' && f.value !== f.defaultValue) onInspectorChange({ target: f });
 }
 
 function nodeForm(n) {
@@ -1523,7 +1535,18 @@ function onInspectorClick(ev) {
   const act = a.dataset.act;
   const o = selObject();
   if (act === 'close') { select(null); return; }
-  if (act === 'dup') { duplicateSelection(); return; }
+  if (act === 'done') { select(null); toast('Changes applied'); return; }
+  if (act === 'dup') {
+    if (V.sel && V.sel.kind === 'circ') {
+      // a cable is duplicated with the load (and isolator) it feeds
+      const c = circById(V.sel.id);
+      const m = emptyMulti();
+      [c && c.iso, c && c.target].filter(Boolean).forEach(id => m.nodes.push(id));
+      if (!m.nodes.length) { toast('Nothing to duplicate on this cable'); return; }
+      V.sel = m;
+    }
+    duplicateSelection(); return;
+  }
   if (act === 'copy') { copySelection(); return; }
   if (act === 'delete') { deleteSelected(); return; }
   if (act === 'deleteRoute') { V.sel = { kind: 'route', id: V.sel.id }; deleteSelected(); return; }
@@ -1830,7 +1853,15 @@ function wire() {
   sc.addEventListener('wheel', ev => { ev.preventDefault(); setZoom(V.zoom * Math.pow(1.0018, -ev.deltaY), ev); }, { passive: false });
 
   el('insp').addEventListener('change', onInspectorChange);
-  el('insp').addEventListener('click', onInspectorClick);
+  el('insp').addEventListener('pointerdown', ev => {
+    const b = ev.target.closest('[data-act],[data-goto]');
+    if (!b || ev.button !== 0) return;
+    ev.preventDefault();
+    commitActiveField();
+    onInspectorClick({ target: b, preventDefault() {} });
+  });
+  // keyboard activation (Enter / Space on a focused button) still arrives as a click
+  el('insp').addEventListener('click', ev => { if (ev.detail === 0) { commitActiveField(); onInspectorClick(ev); } else if (ev.target.closest('[data-goto]')) ev.preventDefault(); });
   el('pal').addEventListener('click', ev => { const b = ev.target.closest('button[data-pk]'); if (!b) return; V.pal[b.dataset.pk] = b.dataset.pv; renderPalette(); scheduleRender(); });
   el('pal').addEventListener('change', ev => { const s2 = ev.target.closest('select[data-pk]'); if (!s2) return; V.pal[s2.dataset.pk] = s2.value; });
   el('status').addEventListener('click', ev => { if (ev.target.closest('[data-act=check]')) checkDialog(); });
@@ -1933,7 +1964,7 @@ function onKey(ev) {
 // expose what outputs.js needs
 window.CT = {
   get P() { return P; }, get A() { return A; }, get V() { return V; },
-  getTK, esc, fmt, el, toast, modal, download, fileBase, circColour, ROUTE_COLS, routePts, nodeById, routeById, circById, select, goTo, measureLen, sheet, ppm, STACK_STEPS, render
+  getTK, changed, esc, fmt, el, toast, modal, download, fileBase, circColour, ROUTE_COLS, routePts, nodeById, routeById, circById, select, goTo, measureLen, sheet, ppm, STACK_STEPS, render
 };
 
 wire();

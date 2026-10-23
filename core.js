@@ -20,13 +20,13 @@
       spare: 25, spaceTrunking: 45, spaceConduit: 40,
       termAllow: 0.5, wasteCable: 5, wasteContain: 5,
       defPower: 'swa', defTail: 'sy', defControl: 'instr', defSignal: 'bms', tailFlex: true,
-      defFamily: 'mcb', defCurve: 'C', motorCurve: 'D', defKA: 10,
+      defFamily: 'mcb', defCurve: 'C', motorCurve: 'C', defKA: 10,
       glandIndoor: 'BW', glandOutdoor: 'CW', cwIndoors: false, shrouds: true, earthTags: true,
       containHeight: 3.0, soffit: 4.0, boardH: 1.5, isolatorH: 1.5, loadH: 1.0, deviceH: 1.2,
       spacing: Object.assign({}, E.SUPPORT_SPACING),
       defMount: 'droprod', defFinish: 'hdg', defType: 'tray', defDuty: 'medium',
       freeMethod: 'C', autoRoute: true, autoHopM: 15, trayBendR: 150, ortho: true, stackScale: 1,
-      isoEnclosure: 'poly', isoIP: 'IP66', stainlessOutdoor: false
+      isoEnclosure: 'poly', isoIP: 'IP66', stainlessOutdoor: false, calcRev: 2
     };
   }
   function newProject() {
@@ -44,7 +44,12 @@
   function repair(P) {
     const d = newProject();
     for (const k of Object.keys(d)) if (P[k] == null) P[k] = d[k];
-    P.settings = Object.assign(defaultSettings(), P.settings || {});
+    const had = P.settings || {};
+    P.settings = Object.assign(defaultSettings(), had);
+    // calcRev 2: DOL motors default to Type C (was D). A file from before
+    // carries 'D' as the old default, not as anyone's choice.
+    if (!(had.calcRev >= 2) && had.motorCurve === 'D') P.settings.motorCurve = 'C';
+    P.settings.calcRev = 2;
     P.settings.spacing = Object.assign({}, E.SUPPORT_SPACING, (P.settings.spacing || {}));
     let max = 0;
     const seen = (id) => { const m = /^[a-z]+([0-9a-z]+)$/.exec(String(id || '')); if (m) max = Math.max(max, parseInt(m[1], 36) || 0); };
@@ -263,11 +268,19 @@
     if (!a || !b) return null;
     const pos = (n) => ({ key: n.kind === 'riser' ? 'n:' + n.id : null, x: n.x, y: n.y, h: Number(n.h) || 0, sheet: n.sheet, node: n.id });
     let ways = (leg.way || []).map(w => wayPos(ix, w)).filter(Boolean);
-    let auto = false;
+    const extra = Math.max(0, Number(leg.extra) || 0);
+    const allow = 2 * (Number(settings.termAllow) || 0);
+    const done = (pts, spans, auto, broken) => {
+      const routeLen = spans.reduce((s, x) => s + x.len, 0);
+      return { role: end.role, from: end.from, to: end.to, pts, spans, routeLen, extra, allow, lengthM: routeLen + extra + allow, auto, broken };
+    };
     if (!ways.length && settings.autoRoute !== false && end.role === 'main' && !leg.direct && G.edges.length) {
-      const best = autoRoute(P, ix, G, a, b);
-      if (best) { ways = [G.nodes.get(best[0]), G.nodes.get(best[1])]; auto = true; }
+      const ap = autoPath(P, ix, G, pos(a), pos(b), settings);
+      if (ap) return done(ap.pts, ap.spans, true, false);
     }
+    // nothing traced and nothing to ride on: a cable runs square to the
+    // building, not diagonally across a room
+    const square = !ways.length;
     const seq = [pos(a)].concat(ways, [pos(b)]);
     const pts = [seq[0]];
     const spans = [];
@@ -291,16 +304,129 @@
       const ppm = pxPerM(P, A.sheet, ix);
       const sameSheet = A.sheet === B.sheet;
       if (!sameSheet) broken = true;
-      const plan = sameSheet ? Math.hypot(A.x - B.x, A.y - B.y) / ppm : 0;
+      const plan = sameSheet ? (square ? Math.abs(A.x - B.x) + Math.abs(A.y - B.y) : Math.hypot(A.x - B.x, A.y - B.y)) / ppm : 0;
       const zA = sheetLevel(P, A.sheet, ix) + (A.h || 0), zB = sheetLevel(P, B.sheet, ix) + (B.h || 0);
       const dh = Math.abs(zA - zB);
       spans.push({ edge: null, from: A, to: B, len: plan + dh, plan, dh });
       pts.push(B);
     }
-    const routeLen = spans.reduce((s, x) => s + x.len, 0);
-    const extra = Math.max(0, Number(leg.extra) || 0);
-    const allow = 2 * (Number(settings.termAllow) || 0);
-    return { role: end.role, from: end.from, to: end.to, pts, spans, routeLen, extra, allow, lengthM: routeLen + extra + allow, auto, broken };
+    return done(pts, spans, false, broken);
+  }
+
+  // Where a piece of equipment can join the containment: the foot of the
+  // perpendicular on every run within reach (so a pump under the middle of a
+  // tray drops from the point above it), as well as the run's corners.
+  function taps(P, ix, G, n, settings) {
+    const ppm = pxPerM(P, n.sheet, ix);
+    const hop = (Number(settings.autoHopM) > 0 ? Number(settings.autoHopM) : 15) * ppm;
+    const out = [];
+    G.edges.forEach(e => {
+      if (!e.rid || e.sheet !== n.sheet) return;
+      const pa = G.nodes.get(e.a), pb = G.nodes.get(e.b);
+      const dx = pb.x - pa.x, dy = pb.y - pa.y, L2 = dx * dx + dy * dy;
+      let t = L2 > 1e-9 ? ((n.x - pa.x) * dx + (n.y - pa.y) * dy) / L2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const x = pa.x + dx * t, y = pa.y + dy * t;
+      const d = Math.hypot(n.x - x, n.y - y);
+      if (d > hop) return;
+      const h = (pa.h || 0) + ((pb.h || 0) - (pa.h || 0)) * t;
+      out.push({ e, t, x, y, h, off: d / ppm + Math.abs((Number(n.h) || 0) - h) });
+    });
+    return out;
+  }
+
+  // The automatic route for a cable: on at the best tap near the start, the
+  // shortest way through the containment, off at the best tap near the end.
+  // Off-containment metres cost double, so a short drop onto a run going the
+  // right way beats a long one onto the wrong run.
+  function autoPath(P, ix, G, a, b, settings) {
+    const W = OFF_WEIGHT;
+    const ta = taps(P, ix, G, a, settings), tb = taps(P, ix, G, b, settings);
+    if (!ta.length || !tb.length) return null;
+    const dist = new Map(), prev = new Map(), done = new Set(), open = new Set();
+    const relax = (k, d, p) => { if (d < (dist.has(k) ? dist.get(k) : Infinity)) { dist.set(k, d); prev.set(k, p); open.add(k); } };
+    ta.forEach(tp => {
+      relax(tp.e.a, W * tp.off + tp.e.len * tp.t, { tap: tp, side: 'a' });
+      relax(tp.e.b, W * tp.off + tp.e.len * (1 - tp.t), { tap: tp, side: 'b' });
+    });
+    while (open.size) {
+      let u = null, bd = Infinity;
+      open.forEach(k => { const d = dist.get(k); if (d < bd) { bd = d; u = k; } });
+      open.delete(u); done.add(u);
+      for (const e of G.adj.get(u) || []) {
+        const v = e.a === u ? e.b : e.a;
+        if (!done.has(v)) relax(v, bd + e.len, { u, e });
+      }
+    }
+    let best = null;
+    tb.forEach(tp => {
+      [['a', tp.e.len * tp.t], ['b', tp.e.len * (1 - tp.t)]].forEach(([side, part]) => {
+        const k = tp.e[side];
+        if (!dist.has(k)) return;
+        const v = dist.get(k) + part + W * tp.off;
+        if (!best || v < best.v) best = { v, tp, side };
+      });
+      // both ends on the same piece of containment
+      ta.forEach(s0 => {
+        if (s0.e !== tp.e) return;
+        const v = W * (s0.off + tp.off) + tp.e.len * Math.abs(s0.t - tp.t);
+        if (!best || v < best.v) best = { v, same: s0, tp };
+      });
+    });
+    if (!best) return null;
+    if (a.sheet === b.sheet) {
+      const ppm = pxPerM(P, a.sheet, ix);
+      const direct = (Math.abs(a.x - b.x) + Math.abs(a.y - b.y)) / ppm + Math.abs((a.h || 0) - (b.h || 0));
+      if (direct < 3 && direct * W < best.v) return null;
+    }
+    // rebuild the route as spans
+    const footOf = (tp) => ({ key: null, x: tp.x, y: tp.y, h: tp.h, sheet: tp.e.sheet });
+    const partial = (e, t0, t1, from, to) => {
+      const f = Math.abs(t1 - t0);
+      return { edge: e, t0: Math.min(t0, t1), t1: Math.max(t0, t1), from, to, len: e.len * f, plan: e.plan * f, dh: e.dh * f };
+    };
+    const free = (A0, B0) => {
+      const ppm = pxPerM(P, A0.sheet, ix);
+      const plan = Math.hypot(A0.x - B0.x, A0.y - B0.y) / ppm;
+      const dh = Math.abs((A0.h || 0) - (B0.h || 0));
+      return { edge: null, from: A0, to: B0, len: plan + dh, plan, dh };
+    };
+    const spans = [];
+    if (best.same) {
+      const fa = footOf(best.same);
+      spans.push(free(a, fa));
+      const fb = footOf(best.tp);
+      if (best.same.t !== best.tp.t) spans.push(partial(best.tp.e, best.same.t, best.tp.t, fa, fb));
+      spans.push(free(fb, b));
+    } else {
+      // walk back from the end vertex to the start tap
+      const chain = [];
+      let k = best.tp.e[best.side];
+      let startTap = null;
+      for (let guard = 0; guard < 10000; guard++) {
+        const pv = prev.get(k);
+        if (!pv) break;
+        if (pv.tap) { startTap = pv; break; }
+        chain.unshift({ e: pv.e, from: pv.u, to: k });
+        k = pv.u;
+      }
+      if (!startTap) return null;
+      const s0 = startTap.tap;
+      const fa2 = footOf(s0);
+      spans.push(free(a, fa2));
+      const v0 = G.nodes.get(s0.e[startTap.side]);
+      const t0end = startTap.side === 'a' ? 0 : 1;
+      if (s0.t !== t0end) spans.push(partial(s0.e, s0.t, t0end, fa2, v0));
+      chain.forEach(ch => spans.push({ edge: ch.e, t0: 0, t1: 1, from: G.nodes.get(ch.from), to: G.nodes.get(ch.to), len: ch.e.len, plan: ch.e.plan, dh: ch.e.dh }));
+      const fb = footOf(best.tp);
+      const vEnd = G.nodes.get(best.tp.e[best.side]);
+      const t1end = best.side === 'a' ? 0 : 1;
+      if (best.tp.t !== t1end) spans.push(partial(best.tp.e, t1end, best.tp.t, vEnd, fb));
+      spans.push(free(fb, b));
+    }
+    const clean = spans.filter(s => s.len > 1e-6 || s.edge);
+    const pts = [a].concat(clean.map(s => s.to));
+    return { pts, spans: clean };
   }
 
   // ------------------------------------------------------------------
@@ -354,7 +480,7 @@
           if (!sp.edge || seen.has(sp.edge.id)) return;
           seen.add(sp.edge.id);
           if (!A.occ.has(sp.edge.id)) A.occ.set(sp.edge.id, []);
-          A.occ.get(sp.edge.id).push({ cid: c.id, role: lp.role, power: c.kind !== 'control' });
+          A.occ.get(sp.edge.id).push({ cid: c.id, role: lp.role, power: c.kind !== 'control', t0: sp.t0 != null ? sp.t0 : 0, t1: sp.t1 != null ? sp.t1 : 1 });
         });
       });
     });
@@ -516,7 +642,7 @@
     const edgeCables = new Map();
     A.occ.forEach((list, eid) => {
       const ods = [];
-      list.forEach(o => odOf(o.cid, o.role).forEach(d => ods.push({ od: d, cid: o.cid, role: o.role })));
+      list.forEach(o => odOf(o.cid, o.role).forEach(d => ods.push({ od: d, cid: o.cid, role: o.role, t0: o.t0, t1: o.t1 })));
       edgeCables.set(eid, ods);
     });
     A.edgeCables = edgeCables;
@@ -872,7 +998,7 @@
     return { rating, poles: pick.poles, aux: pick.aux, enclosure, ip, fused, duty: pick.duty, text, warn, circuit: c ? c.id : null };
   }
 
-  const api = { defaultSettings, newProject, nid, repair, index, buildGraph, shortestPath, nearestGraphNode, autoRoute, legEnds, legPath, ptPos, rootOf, pxPerM, sheetLevel, solve, takeoff, isolatorSpec, routeFittings, routeLengths, deviceFor, legType, loadInput, FITTING_NAMES };
+  const api = { defaultSettings, newProject, nid, repair, index, buildGraph, shortestPath, nearestGraphNode, autoRoute, autoPath, taps, legEnds, legPath, ptPos, rootOf, pxPerM, sheetLevel, solve, takeoff, isolatorSpec, routeFittings, routeLengths, deviceFor, legType, loadInput, FITTING_NAMES };
   root.CableCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -38,7 +38,8 @@ function sample() {
   const cond = r1.legs[0].govCond;
   ok(cond && (cond.n === 2 || cond.n === 1), 'grouping counts circuits on the shared tray');
   ok(r1.legs[1].role === 'tail' && r1.legs[1].short === 'SY', 'tail defaults to SY flex');
-  ok(r1.device.curve === 'D', 'DOL motor defaults to Type D');
+  ok(r1.device.curve === 'C', 'DOL motor defaults to Type C');
+  ok(r1.In >= 1.2 * r1.start / 5, 'Type C rating raised to ride through the DOL start');
   const r2 = A.results.get('c2');
   ok(r2.device.curve === 'C', 'VSD motor defaults to Type C');
   const tr = A.routes.get('r1');
@@ -58,6 +59,36 @@ function sample() {
   const rr = A2.results.get('c1');
   ok(rr.legs[0].step === -3 || rr.legs[0].size === E.CABLE_TYPES.swa.sizes[0], 'downsized cable is kept, not blocked');
   ok(!rr.ok, 'downsized cable fails a check and is flagged');
+}
+
+{
+  // a pump under the middle of a straight tray drops from the point above it
+  const P = C.newProject();
+  P.sheets.push({ id: 's1', pxPerM: 50, level: 0 });
+  P.nodes.push({ id: 'b1', sheet: 's1', kind: 'board', name: 'DB1', x: 0, y: 100, h: 1.5, phase: 3 });
+  P.nodes.push({ id: 'l1', sheet: 's1', kind: 'load', name: 'P1', x: 800, y: 300, h: 0.5, loadKind: 'pump', phase: 3, kw: 4, drive: 'DOL' });
+  P.routes.push({ id: 'r1', sheet: 's1', name: 'T1', type: 'tray', pts: [{ id: 'p1', x: 50, y: 100, h: 3 }, { id: 'p2', x: 1550, y: 100, h: 3 }] });
+  P.circuits.push({ id: 'c1', kind: 'power', board: 'b1', target: 'l1', device: {}, legs: { main: {} } });
+  const A = C.solve(P);
+  const lp = A.results.get('c1').paths[0];
+  // 1 m + 1.5 m up to the tray, 15 m along, 4 m across + 2.5 m down
+  near(lp.routeLen, 24, 0.01, 'mid-tray drop: board up, 15 m along the tray, across and down');
+  const o = A.occ.get('r1:1')[0];
+  ok(Math.abs(o.t1 - 0.5) < 1e-6, 'cable rides only the half of the tray it uses');
+
+  // hand calculation: 4c 2.5 SWA, Ib from 4 kW at pf 0.85, 26 m incl. 1 m terminations
+  const r = A.results.get('c1');
+  const leg = r.legs[0];
+  const ib = 4000 / (Math.sqrt(3) * 400 * 0.85);
+  near(r.ib, ib, 1e-6, 'Ib = P / (√3 × 400 × pf)');
+  const mv = E.mvPerAm('4E4A', 3, leg.size);
+  near(leg.vdV, mv * ib * leg.lengthM / 1000, 1e-9, 'VD = mV/A/m × Ib × L / 1000');
+  near(leg.vdPct, leg.vdV / 400 * 100, 1e-9, 'three phase VD % of 400 V');
+  near(r.zs, 0.35 + (E.R20[leg.size] * 1.28 + E.R20[leg.cpcArea] * 1.28) * leg.lengthM / 1000, 1e-9, 'Zs = Zdb + (R1 + R2) × 1.28 × L');
+  // a load with no containment near: square, not diagonal
+  P.routes = [];
+  const A2 = C.solve(P);
+  near(A2.results.get('c1').paths[0].routeLen, (800 + 200) / 50 + 1, 0.01, 'no containment: runs square to the building');
 }
 
 {

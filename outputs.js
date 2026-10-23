@@ -229,8 +229,11 @@
         const o = off + d / 2; off += d;
         const c = CT.circById(cb.cid); if (!c) return;
         let p1, p2;
-        if (kk) { p1 = { x: A3.x, y: A3.y, z: A3.z + o }; p2 = { x: B3.x, y: B3.y, z: B3.z + o }; }
-        else { p1 = { x: A3.x + ux * o, y: A3.y + uy * o, z: A3.z + d / 2 }; p2 = { x: B3.x + ux * o, y: B3.y + uy * o, z: B3.z + d / 2 }; }
+        const t0 = cb.t0 != null ? cb.t0 : 0, t1 = cb.t1 != null ? cb.t1 : 1;
+        const L0 = { x: A3.x + (B3.x - A3.x) * t0, y: A3.y + (B3.y - A3.y) * t0, z: A3.z + (B3.z - A3.z) * t0 };
+        const L1 = { x: A3.x + (B3.x - A3.x) * t1, y: A3.y + (B3.y - A3.y) * t1, z: A3.z + (B3.z - A3.z) * t1 };
+        if (kk) { p1 = { x: L0.x, y: L0.y, z: L0.z + o }; p2 = { x: L1.x, y: L1.y, z: L1.z + o }; }
+        else { p1 = { x: L0.x + ux * o, y: L0.y + uy * o, z: L0.z + d / 2 }; p2 = { x: L1.x + ux * o, y: L1.y + uy * o, z: L1.z + d / 2 }; }
         prims.push({ t: 'line', a: p1, b: p2, stroke: CT.circColour(c), lw: 2 });
       });
       // drop rods
@@ -266,20 +269,25 @@
     P.nodes.forEach(n => {
       if (!onSheet(n.sheet)) return;
       const p = worldOf(n.sheet, n.x, n.y, n.h);
-      let sx = 0.3, sy = 0.3, sz = 0.3, col = '#888';
-      if (n.kind === 'board') { sx = 0.8; sy = 0.25; sz = 1.2; col = n.boardKind === 'BMS' || n.boardKind === 'CP' ? '#2471a3' : '#23262c'; }
-      else if (n.kind === 'load') { sx = 0.9; sy = 0.9; sz = 0.9; col = '#8e4b1a'; }
-      else if (n.kind === 'isolator') { sx = 0.2; sy = 0.15; sz = 0.25; col = '#c0392b'; }
-      else if (n.kind === 'device') { sx = 0.15; sy = 0.15; sz = 0.15; col = '#2471a3'; }
-      else if (n.kind === 'riser') { sx = 0.12; sy = 0.12; sz = 0.12; col = '#b9770e'; }
+      // small, light boxes: a pump set or a row of isolators must not merge
+      // into one dark block. Sizes are nominal, scaled by the 3D bar's
+      // Equipment control.
+      const f = opts.equip || 1;
+      let sx = 0.1, sy = 0.1, sz = 0.1, col = '#888';
+      if (n.kind === 'board') { sx = 0.45; sy = 0.15; sz = 0.6; col = n.boardKind === 'BMS' || n.boardKind === 'CP' ? '#2e86c1' : '#5d6d7e'; }
+      else if (n.kind === 'load') { sx = 0.35; sy = 0.35; sz = 0.35; col = '#d68910'; }
+      else if (n.kind === 'isolator') { sx = 0.1; sy = 0.06; sz = 0.12; col = '#c0392b'; }
+      else if (n.kind === 'device') { sx = 0.06; sy = 0.06; sz = 0.06; col = '#2471a3'; }
+      else if (n.kind === 'riser') { sx = 0.08; sy = 0.08; sz = 0.08; col = '#b9770e'; }
+      sx *= f; sy *= f; sz *= f;
       box(prims, p, sx, sy, sz, col);
-      prims.push({ t: 'text', a: { x: p.x, y: p.y, z: p.z + sz / 2 + 0.15 }, text: n.name || '', col: '#23262c' });
+      if (opts.labels !== false) prims.push({ t: 'text', a: { x: p.x, y: p.y, z: p.z + sz / 2 + 0.12 }, text: n.name || '', col: '#23262c' });
     });
     return prims;
   }
   function box(prims, c, sx, sy, sz, col) {
     const x0 = c.x - sx / 2, x1 = c.x + sx / 2, y0 = c.y - sy / 2, y1 = c.y + sy / 2, z0 = c.z - sz / 2, z1 = c.z + sz / 2;
-    const f = (pts) => prims.push({ t: 'poly', pts, fill: hexA(col, 0.55), stroke: col, lw: 1 });
+    const f = (pts) => prims.push({ t: 'poly', pts, fill: hexA(col, 0.3), stroke: col, lw: 1 });
     f([{ x: x0, y: y0, z: z1 }, { x: x1, y: y0, z: z1 }, { x: x1, y: y1, z: z1 }, { x: x0, y: y1, z: z1 }]);
     f([{ x: x0, y: y0, z: z0 }, { x: x1, y: y0, z: z0 }, { x: x1, y: y0, z: z1 }, { x: x0, y: y0, z: z1 }]);
     f([{ x: x0, y: y1, z: z0 }, { x: x1, y: y1, z: z0 }, { x: x1, y: y1, z: z1 }, { x: x0, y: y1, z: z1 }]);
@@ -334,7 +342,7 @@
         ctx.beginPath(); ctx.moveTo(it.s[0].x, it.s[0].y); ctx.lineTo(it.s[1].x, it.s[1].y);
         ctx.strokeStyle = p.stroke; ctx.lineWidth = p.lw || 1; ctx.lineCap = 'round'; ctx.stroke();
       } else {
-        ctx.font = '600 11px Archivo, sans-serif'; ctx.fillStyle = p.col; ctx.textAlign = 'center';
+        ctx.font = '600 10px Archivo, sans-serif'; ctx.fillStyle = p.col; ctx.textAlign = 'center';
         ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.strokeText(p.text, it.s[0].x, it.s[0].y); ctx.fillText(p.text, it.s[0].x, it.s[0].y);
       }
     });
@@ -346,7 +354,7 @@
     const dpr = window.devicePixelRatio || 1;
     cv.width = Math.max(200, Math.round(r.width * dpr)); cv.height = Math.max(200, Math.round(r.height * dpr));
     cam.ex = Number(el('threeEx').value) || 1;
-    const prims = scene({ all: el('threeAll').checked, fixings: el('threeFix').checked });
+    const prims = scene({ all: el('threeAll').checked, fixings: el('threeFix').checked, equip: Number(el('threeEq').value) || 1, labels: el('threeLbl').checked });
     const scaled = Object.assign({}, cam);
     if (!fit && cam.fitted) { scaled.scale = cam.scale * dpr; scaled.ox = cam.ox * dpr; scaled.oy = cam.oy * dpr; }
     renderTo(cv, prims, scaled, fit || !cam.fitted);
@@ -365,7 +373,7 @@
   el('b3d').onclick = () => (threeOpen() ? close3D() : open3D());
   el('b3dClose').onclick = close3D;
   el('threeViews').addEventListener('click', ev => { const b = ev.target.closest('button[data-v]'); if (!b) return; document.querySelectorAll('#threeViews button').forEach(x => x.classList.toggle('on', x === b && b.dataset.v !== 'fit')); view(b.dataset.v === 'fit' ? null : b.dataset.v); });
-  ['threeEx', 'threeAll', 'threeFix'].forEach(id => el(id).addEventListener('change', () => draw3D(true)));
+  ['threeEx', 'threeAll', 'threeFix', 'threeEq', 'threeLbl'].forEach(id => el(id).addEventListener('change', () => draw3D(true)));
   (function wire3D() {
     const cv = el('c3d');
     let drag = null;
