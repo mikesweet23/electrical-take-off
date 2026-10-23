@@ -54,7 +54,7 @@
   function containRows() {
     const P = CT.P, A = CT.A;
     const TK = CT.getTK();
-    const head = ['Run', 'Sheet', 'Type', 'Duty', 'Finish', 'Size', 'Plan m', 'Vertical m', 'Total m', 'Cables', 'Circuits', 'Σ OD mm', 'Needed mm', 'Fill %', 'Fixing', 'Spacing m', 'Supports', 'Fittings', 'Status'];
+    const head = ['Run', 'Sheet', 'Type', 'Duty', 'Finish', 'Size', 'Plan m', 'Vertical m', 'Total m', 'Cables', 'Circuits', 'Grouped', 'Segregation', 'Σ OD mm', 'Needed mm', 'Fill %', 'Fixing', 'Spacing m', 'Supports', 'Fittings', 'Status'];
     const rows = P.routes.map(r => {
       const res = A.routes.get(r.id) || {};
       const def = E.CONTAINMENT[r.type] || E.CONTAINMENT.tray;
@@ -64,14 +64,14 @@
         rid: r.id, ok: res.ok !== false, warn: res.okSpare === false,
         cells: [r.name, sheetName(r.sheet), def.label, def.duties[r.duty || def.defaultDuty] || '', r.type.startsWith('pvc') ? 'PVC' : (E.FINISHES[r.finish || P.settings.defFinish] || ''),
           res.size || '', n2(res.lens ? res.lens.plan : 0, 2), n2(res.lens ? res.lens.vert : 0, 2), n2(res.lens ? res.lens.total : 0, 2),
-          res.cables || 0, res.nCircuits || 0, n2(res.sumOd, 1), def.fill === 'width' ? n2(res.reqMm, 0) : '', n2(res.fillPct, 0),
+          res.cables || 0, res.nCircuits || 0, res.maxGrouped || 0, res.mixed ? (res.seg === 'divider' ? (def.fill === 'area' ? 'Compartment' : 'Divider') : res.seg === 'gap' ? res.sepMm + ' mm gap' : 'Separate') : '', n2(res.sumOd, 1), def.fill === 'width' ? n2(res.reqMm, 0) : '', n2(res.fillPct, 0),
           E.MOUNTS[res.mount] || '', n2(res.spacing, 2), res.supports || 0,
           Object.keys(f).filter(k => f[k] && names[k]).map(k => f[k] + '× ' + names[k]).join(', '),
           res.ok === false ? 'OVER-FULL' : res.okSpare === false ? 'No spare' : 'OK']
       };
     });
     (A.risers || new Map()).forEach((res, key) => {
-      rows.push({ ok: res.ok !== false, cells: ['Riser ' + key, '', (E.CONTAINMENT[res.kind] || {}).label + ' (riser)', '', '', res.size, 0, n2(res.len, 2), n2(res.len, 2), res.cables, '', n2(res.sumOd, 1), n2(res.reqMm, 0), n2(res.fillPct, 0), E.MOUNTS.wallbracket, '', '', '', res.ok === false ? 'OVER-FULL' : 'OK'] });
+      rows.push({ ok: res.ok !== false, cells: ['Riser ' + key, '', (E.CONTAINMENT[res.kind] || {}).label + ' (riser)', '', '', res.size, 0, n2(res.len, 2), n2(res.len, 2), res.cables, '', '', res.mixed ? 'Divider' : '', n2(res.sumOd, 1), n2(res.reqMm, 0), n2(res.fillPct, 0), E.MOUNTS.wallbracket, '', '', '', res.ok === false ? 'OVER-FULL' : 'OK'] });
     });
     return { head, rows };
   }
@@ -192,14 +192,14 @@
         const nA = A.ix.node.get(e.a.slice(2)), nB = A.ix.node.get(e.b.slice(2));
         if (!nA || !nB || (!allSheets && (nA.sheet !== P.active && nB.sheet !== P.active))) return;
         const res = A.risers.get(e.riser) || {};
-        const w = (res.width || 150) / 1000;
+        const w = (res.drawMm || 150) / 1000;
         const p1 = worldOf(nA.sheet, nA.x, nA.y, nA.h), p2 = worldOf(nB.sheet, nB.x, nB.y, nB.h);
         prims.push({ t: 'poly', pts: [{ x: p1.x - w / 2, y: p1.y, z: p1.z }, { x: p1.x + w / 2, y: p1.y, z: p1.z }, { x: p2.x + w / 2, y: p2.y, z: p2.z }, { x: p2.x - w / 2, y: p2.y, z: p2.z }], fill: 'rgba(185,119,14,0.25)', stroke: '#b9770e', lw: 1 });
         return;
       }
       const res = A.routes.get(r.id) || {};
       const col = CT.ROUTE_COLS[r.type] || '#777';
-      const w = Math.max(0.02, (r.type === 'cleats' ? (res.sumOd || 20) : (res.width || 100)) / 1000);
+      const w = Math.max(0.02, (r.type === 'cleats' ? (res.sumOd || 20) : (res.drawMm || 100)) / 1000);
       const A3 = worldOf(r.sheet, pa.x, pa.y, pa.h), B3 = worldOf(r.sheet, pb.x, pb.y, pb.h);
       let nx = -(B3.y - A3.y), ny = B3.x - A3.x;
       let L = Math.hypot(nx, ny);
@@ -217,24 +217,24 @@
       } else {
         prims.push({ t: 'poly', pts: [{ x: A3.x + nx, y: A3.y + ny, z: A3.z }, { x: B3.x + nx, y: B3.y + ny, z: B3.z }, { x: B3.x - nx, y: B3.y - ny, z: B3.z }, { x: A3.x - nx, y: A3.y - ny, z: A3.z }], fill: hexA(col, res.ok === false ? 0.12 : 0.28), stroke: res.ok === false ? '#bb3b2e' : col, lw: 1 });
       }
-      // cables across it
-      const list = (A.edgeCables.get(e.id) || []).slice();
-      const order = new Map(P.circuits.map((c, i) => [c.id, i]));
-      list.sort((a, b) => order.get(a.cid) - order.get(b.cid));
-      const total = list.reduce((s, c) => s + c.od / 1000, 0);
-      let off = r.orient === 'wall' ? 0 : -total / 2;
+      // side lips at the run's real depth, so a tray reads as a tray
+      const def = E.CONTAINMENT[r.type] || {};
+      const depth = !kk && def.fill === 'width' ? ((def.depths && def.depths[r.type === 'ladder' ? 0 : 1]) || def.depths && def.depths[0] || 50) / 1000 : 0;
+      if (depth) [1, -1].forEach(sg => prims.push({ t: 'poly', pts: [{ x: A3.x + nx * sg, y: A3.y + ny * sg, z: A3.z }, { x: B3.x + nx * sg, y: B3.y + ny * sg, z: B3.z }, { x: B3.x + nx * sg, y: B3.y + ny * sg, z: B3.z + depth }, { x: A3.x + nx * sg, y: A3.y + ny * sg, z: A3.z + depth }], fill: hexA(col, 0.18), stroke: col, lw: 1 }));
+      // cables across it, laid out exactly as on the plan (C.edgeLayout)
+      const lay = C.edgeLayout(P, A, e.id);
       const ux = nx / (w / 2), uy = ny / (w / 2);
-      list.forEach(cb => {
+      const at = (t, o, dz) => ({ x: A3.x + (B3.x - A3.x) * t + (kk ? 0 : ux * o), y: A3.y + (B3.y - A3.y) * t + (kk ? 0 : uy * o), z: A3.z + (B3.z - A3.z) * t + (kk ? o + w / 2 : dz) });
+      if (lay.divider != null) {
+        const o = lay.divider / 1000;
+        prims.push({ t: 'poly', pts: [at(0, o, 0), at(1, o, 0), at(1, o, Math.max(depth, 0.05)), at(0, o, Math.max(depth, 0.05))], fill: 'rgba(35,38,44,0.35)', stroke: '#23262c', lw: 1 });
+      }
+      lay.items.forEach(cb => {
         const d = cb.od / 1000;
-        const o = off + d / 2; off += d;
+        const o = cb.off / 1000;
         const c = CT.circById(cb.cid); if (!c) return;
-        let p1, p2;
         const t0 = cb.t0 != null ? cb.t0 : 0, t1 = cb.t1 != null ? cb.t1 : 1;
-        const L0 = { x: A3.x + (B3.x - A3.x) * t0, y: A3.y + (B3.y - A3.y) * t0, z: A3.z + (B3.z - A3.z) * t0 };
-        const L1 = { x: A3.x + (B3.x - A3.x) * t1, y: A3.y + (B3.y - A3.y) * t1, z: A3.z + (B3.z - A3.z) * t1 };
-        if (kk) { p1 = { x: L0.x, y: L0.y, z: L0.z + o }; p2 = { x: L1.x, y: L1.y, z: L1.z + o }; }
-        else { p1 = { x: L0.x + ux * o, y: L0.y + uy * o, z: L0.z + d / 2 }; p2 = { x: L1.x + ux * o, y: L1.y + uy * o, z: L1.z + d / 2 }; }
-        prims.push({ t: 'line', a: p1, b: p2, stroke: CT.circColour(c), lw: 2 });
+        prims.push({ t: 'line', a: at(t0, o, d / 2), b: at(t1, o, d / 2), stroke: CT.circColour(c), lw: 2 });
       });
       // drop rods
       if (opts.fixings && (r.mount === 'droprod' || r.mount === 'beamclamp' || (!r.mount && P.settings.defMount === 'droprod')) && e.plan > 0.01) {

@@ -45,14 +45,17 @@ cdnjs (the same build Pipe Trace uses); images open without it.
    nothing traced and nothing to ride on is costed square to the building
    (|dx| + |dy|), never diagonally across a room.
 2. **Grouping.** `A.occ` lists every circuit on every piece (edge) of
-   containment. Cg for a leg is taken per edge from the number of *power*
-   circuits on it (control and data are not counted — Table 4C1 note on lightly
-   loaded cables). Ca from the run's ambient. Ci per leg. Each distinct
+   containment, with the stretch `t0`–`t1` it rides. Cg for a leg is the most
+   *power* circuits lying together at any point of its own stretch
+   (`maxCover`), so a cable that has dropped off the tray no longer derates
+   the ones further along (control and data are not counted — Table 4C1 note
+   on lightly loaded cables). Ca from the run's ambient. Ci per leg. Each distinct
    condition is passed to the engine; **the worst one governs**.
 3. **Device.** Smallest rating ≥ Ib, and for DOL / star-delta / soft start on
    an MCB, the curve's no-trip threshold must clear 1.2 × the starting current.
    DOL / star-delta / soft-start motors default to Type C (`motorCurve`; a
-   file from before `calcRev` 2 carrying the old 'D' default is moved to C),
+   file from before `calcRev` 2 carrying the old 'D' default is moved to C;
+   before `calcRev` 3 a default Zdb of 0.35 Ω is moved to 0.2 Ω),
    with the rating raised until the start clears.
 4. **Cable.** Smallest size with Iz ≥ In under every condition (Iz ≥ Ib when
    "overload at starter" is ticked), never below `minPower` (Table 52.3). Then
@@ -127,9 +130,20 @@ settings merged over defaults, and the id counter moved past every id in use.
 - **Heights are per point**, above that sheet's floor level. Clicking the last
   point again with a new height makes a vertical riser. `[` / `]` nudge the
   next height while tracing.
-- **Stacking is drawn, not stored.** Cables on a run are drawn side by side at
-  true diameter across the run's width (`orient: 'wall'` packs from the wall
-  side). The zoomer's `1:1` button exaggerates the diameters for reading; it
+- **Stacking is drawn, not stored, from one layout.** `C.edgeLayout()` places
+  every cable across a piece of containment (mm from the centreline, positive
+  to the right of the trace direction); the plan and the 3D both draw from it,
+  at the width the take-off orders (`res.drawMm`: the chosen width, or what is
+  needed when nothing fits). Band II packs from one edge (the wall for a tray
+  on edge), Band I from the other with the divider between; spaced cables keep
+  2 × D apart.
+- **Segregation (528.1).** `bandOf()`: power and control over 50 V are Band
+  II; ELV control, data and signal are Band I. A run carrying both is sized
+  with both packs plus the divider allowance (`segMethod: divider`) or clear
+  gap (`gap`), counts a divider the length of the run in the take-off (a
+  compartment for trunking), and fails in conduit. `separate` flags the run.
+  The route width is sized at its fullest point (`fullestPoint`), not by
+  adding up everything that ever touches a piece. The zoomer's `1:1` button exaggerates the diameters for reading; it
   changes nothing in the sums.
 - **One analysis.** `changed()` → `solveNow()` → `C.solve(P)`; the take-off is
   built lazily from that. The plan, inspector, schedules, 3D, PDF and Excel all

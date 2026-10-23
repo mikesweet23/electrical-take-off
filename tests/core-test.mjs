@@ -84,7 +84,7 @@ function sample() {
   const mv = E.mvPerAm('4E4A', 3, leg.size);
   near(leg.vdV, mv * ib * leg.lengthM / 1000, 1e-9, 'VD = mV/A/m × Ib × L / 1000');
   near(leg.vdPct, leg.vdV / 400 * 100, 1e-9, 'three phase VD % of 400 V');
-  near(r.zs, 0.35 + (E.R20[leg.size] * 1.28 + E.R20[leg.cpcArea] * 1.28) * leg.lengthM / 1000, 1e-9, 'Zs = Zdb + (R1 + R2) × 1.28 × L');
+  near(r.zs, 0.2 + (E.R20[leg.size] * 1.28 + E.R20[leg.cpcArea] * 1.28) * leg.lengthM / 1000, 1e-9, 'Zs = Zdb + (R1 + R2) × 1.28 × L');
   // a load with no containment near: square, not diagonal
   P.routes = [];
   const A2 = C.solve(P);
@@ -148,6 +148,50 @@ function sample() {
   ok(r.legs[0].size === 1.5 && !r.ok, '24 V 20 VA at 80 m: 1.5 mm² is the largest and still over 5 %');
   const r2 = E.sizeCircuit({ kind: 'control', ctrl: { signal: true }, legs: [{ role: 'main', type: 'cat6', lengthM: 95 }] }, {});
   ok(!r2.ok, 'Cat6 over 90 m flagged');
+}
+
+{
+  // segregation: a BMS 24 V cable and a power cable on one tray get a divider
+  const P = sample();
+  P.nodes.push({ id: 'bm', sheet: 's1', kind: 'board', boardKind: 'BMS', name: 'BMS1', x: 100, y: 140, h: 1.5 });
+  P.nodes.push({ id: 'fd', sheet: 's1', kind: 'device', name: 'FD1', x: 2100, y: 650, h: 1.2 });
+  P.circuits.push({ id: 'cc', kind: 'control', board: 'bm', target: 'fd', ctrl: { volts: 24, va: 10 }, device: {}, legs: { main: {} } });
+  const A = C.solve(P);
+  const tr = A.routes.get('r1');
+  ok(tr.mixed && tr.seg === 'divider', 'power and 24 V control on one tray: segregated by a divider');
+  const lay = C.edgeLayout(P, A, 'r1:1');
+  const pw = lay.items.filter(x => x.band === 'II'), ct = lay.items.filter(x => x.band === 'I');
+  ok(lay.divider != null && pw.every(x => x.off < lay.divider) && ct.every(x => x.off > lay.divider), 'power one side of the divider, control the other');
+  ok(lay.items.every(x => Math.abs(x.off) + x.od / 2 <= lay.W / 2 + 1e-6), 'every cable lies inside the tray width');
+  const g = A.results.get('c1').legs[0].govCond;
+  ok(g.n === 2, 'control cable not counted in the grouping (' + g.n + ')');
+  const T = C.takeoff(P, A);
+  ok([...T.contain.values()].some(v => /divider/i.test(v.desc)), 'tray divider in the take-off');
+  // the same pair in one conduit fails
+  P.routes[0].type = 'conduit';
+  const A2 = C.solve(P);
+  ok(A2.issues.some(i => /same conduit/.test(i.text)), 'power and data in one conduit is flagged');
+}
+
+{
+  // spaced cables lie 2 × D apart and the tray is sized for it
+  const P = sample();
+  P.routes[0].layout = 'spaced';
+  const A = C.solve(P);
+  const lay = C.edgeLayout(P, A, 'r1:1');
+  const [a, b] = lay.items.sort((p, q) => p.off - q.off);
+  ok(Math.abs((b.off - b.od / 2) - (a.off + a.od / 2) - 2 * a.od) < 1e-6, 'spaced: clear gap of 2 × D between cables');
+  ok(A.routes.get('r1').width >= lay.items.reduce((s, x) => s + 3 * x.od, 0) - 2 * a.od, 'spaced tray wide enough');
+  ok(A.results.get('c1').legs[0].cg === 1, 'spaced: no grouping reduction');
+}
+
+{
+  // grouping counts where cables lie together, not the whole piece
+  const P = sample();
+  // the VSD fan (c2) leaves the long straight before the pump's cable does
+  const A = C.solve(P);
+  const occ = A.occ.get('r1:1');
+  ok(occ.length === 2, 'two circuits ride the long straight');
 }
 
 console.log(fails ? fails + ' FAILED' : 'all passed');

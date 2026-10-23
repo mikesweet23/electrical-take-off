@@ -426,7 +426,7 @@ function render() {
     const pts = routePts(r);
     if (pts.length < 2) return;
     const res = A.routes.get(r.id) || {};
-    const wmm = r.type === 'cleats' ? Math.max(20, (res.sumOd || 20)) : (res.width || (res.reqMm || 100));
+    const wmm = r.type === 'cleats' ? Math.max(20, (res.sumOd || 20)) : (res.drawMm || 100);
     const wpx = Math.max(wmm * k, px(3));
     const col = ROUTE_COLS[r.type] || '#777';
     const d = pts.map((q, i) => (i ? 'L' : 'M') + q.x.toFixed(1) + ' ' + q.y.toFixed(1)).join('');
@@ -462,35 +462,26 @@ function render() {
     }
   });
 
-  // cables on containment: stacked side by side at true diameter
-  const edgeOrder = (eid) => {
-    const list = (A.edgeCables.get(eid) || []).slice();
-    const order = new Map(P.circuits.map((c, i) => [c.id, i]));
-    list.sort((a, b) => (order.get(a.cid) - order.get(b.cid)) || (a.role < b.role ? -1 : 1));
-    return list;
-  };
+  // cables on containment: stacked side by side at true diameter, laid out by
+  // C.edgeLayout() — the same layout the 3D draws and the take-off sizes for
   A.G.edges.forEach(e => {
     if (!e.rid) return;
     const r = A.ix.route.get(e.rid);
     if (!r || r.sheet !== s.id) return;
     const pa = A.G.nodes.get(e.a), pb = A.G.nodes.get(e.b);
     const L = Math.hypot(pb.x - pa.x, pb.y - pa.y);
-    const list = edgeOrder(e.id);
-    if (!list.length) return;
     if (L < 1) return;
+    const lay = C.edgeLayout(P, A, e.id);
+    if (!lay.items.length) return;
     const ux = (pb.x - pa.x) / L, uy = (pb.y - pa.y) / L;
     const nx = -uy, ny = ux;
-    const res = A.routes.get(r.id) || {};
-    const W = (res.width || res.sumOd || 50) * k;
-    const total = list.reduce((acc, c) => acc + c.od * k * f, 0);
-    let off;
-    if (r.orient === 'wall') off = (r.side === -1) ? W / 2 - total : -W / 2;
-    else off = -total / 2;
-    // trim the ends so cables meet the corner rather than overshoot
-    list.forEach(cb => {
+    if (lay.divider != null) {
+      const o = lay.divider * k * f;
+      out.push('<line x1="' + (pa.x + nx * o).toFixed(2) + '" y1="' + (pa.y + ny * o).toFixed(2) + '" x2="' + (pb.x + nx * o).toFixed(2) + '" y2="' + (pb.y + ny * o).toFixed(2) + '" stroke="#23262c" stroke-width="' + Math.max(2 * k, px(1.2)).toFixed(3) + '" stroke-dasharray="' + px(6) + ' ' + px(3) + '"/>');
+    }
+    lay.items.forEach(cb => {
       const w = cb.od * k * f;
-      const o = off + w / 2;
-      off += w;
+      const o = cb.off * k * f;
       const c = circById(cb.cid);
       if (!c) return;
       // only the stretch of this piece the cable actually rides
@@ -1370,7 +1361,9 @@ function routeForm(r) {
   h += '<h4>Fill</h4><table class="kv">'
     + '<tr><td>Length (plan + vertical)</td><td>' + fmt(lens.plan, 2) + ' + ' + fmt(lens.vert, 2) + ' m</td></tr>'
     + '<tr><td>Cables on the fullest section</td><td>' + (res.cables || 0) + '</td></tr>'
-    + '<tr><td>Circuits sharing (grouping)</td><td>' + (res.nCircuits || 0) + '</td></tr>'
+    + '<tr><td>Circuits on the run</td><td>' + (res.nCircuits || 0) + '</td></tr>'
+    + '<tr><td>Most power circuits side by side (Cg)</td><td>' + (res.maxGrouped || 0) + (res.maxGrouped > 1 ? ' → ' + E.cgFor(r.layout === 'spaced' ? 'spaced' : ((E.CONTAINMENT_METHOD[(E.CONTAINMENT[r.type] || {}).methodKey || r.type] || {}).arr || 'tray'), res.maxGrouped).toFixed(2) : '') + '</td></tr>'
+    + (res.mixed ? '<tr><td>Power / control segregation</td><td>' + (res.seg === 'divider' ? 'divider' + (res.sepMm ? ' (' + res.sepMm + ' mm)' : '') : res.seg === 'gap' ? res.sepMm + ' mm gap' : (E.CONTAINMENT[r.type].fill === 'area' ? 'compartment' : 'separate runs')) + '</td></tr>' : '')
     + '<tr><td>Sum of diameters</td><td>' + fmt(res.sumOd, 1) + ' mm</td></tr>'
     + (def.fill === 'width' ? '<tr><td>Needed with ' + P.settings.spare + ' % spare</td><td>' + fmt(res.reqMm, 0) + ' mm</td></tr>' : '')
     + '<tr><td>Selected</td><td>' + esc(res.size || '—') + '</td></tr>'
@@ -1670,6 +1663,9 @@ function basisDialog() {
   h += F('Trunking space factor', S('spaceTrunking', s.spaceTrunking, '%'));
   h += F('Conduit space factor', S('spaceConduit', s.spaceConduit, '%'));
   h += F('Standard tray bend radius', S('trayBendR', s.trayBendR, 'mm (above this → ladder)'));
+  h += F('Power / data segregation', Sel('segMethod', s.segMethod, [['divider', 'Divider in the tray (BS EN 50174-2)'], ['gap', 'Clear gap, no divider'], ['separate', 'Separate containment — flag shared runs']]));
+  h += F('Divider allowance', S('segDividerMm', s.segDividerMm, 'mm of width'));
+  h += F('Clear gap', S('segGapMm', s.segGapMm, 'mm, when no divider'));
   h += F('Default finish', Sel('defFinish', s.defFinish, Object.keys(E.FINISHES).filter(k => k !== 'pvc').map(k => [k, E.FINISHES[k]])));
   h += F('Default fixing', Sel('defMount', s.defMount, Object.keys(E.MOUNTS).map(k => [k, E.MOUNTS[k]])));
   h += F('Containment wastage', S('wasteContain', s.wasteContain, '%'));
@@ -1685,6 +1681,8 @@ function basisDialog() {
     + '<li>Zs = Zdb + (R1 + R2) × length at operating temperature (×1.20 for 70 °C, ×1.28 for 90 °C, steel armour ×1.18), against Tables 41.2–41.4 with Cmin 0.95. 0.4 s for final circuits up to ' + s.maxFinalA + ' A on TN, 5 s for distribution circuits.</li>'
     + '<li>CPC adiabatic check S ≥ √(I²t)/k (543.1.3) with k from Tables 54.3 / 54.4; MCB and MCCB instantaneous trips taken at 0.1 s.</li>'
     + '<li>Breaking capacity against the fault level at the board (434.5.1). TT: RCD and Table 41.5.</li>'
+    + '<li>Grouping (Cg) counts the power circuits actually lying together at the fullest point of each stretch a cable rides — a cable that has left the tray no longer derates the others. Control and data cables (Band I) are not counted.</li>'
+    + '<li>Band I (ELV control, data) and Band II (LV power) on one run are segregated (528.1, BS EN 50174-2): a divider, a clear gap or separate runs in tray, ladder and basket; a compartment in trunking; never the same conduit.</li>'
     + '<li>Containment: tray, ladder and basket from the sum of overall diameters plus the spare above; trunking to the space factor (On-Site Guide, 45 %); conduit to its space factor.</li>'
     + '<li>Cable diameters, armour resistance and area, and gland ranges are typical UK catalogue figures (Prysmian / Doncaster / CMP). Check the supplier\'s sheet for a tight tray or a gland order.</li>'
     + '<li>This is a design aid. A competent designer must check the result before it is issued.</li></ul>';

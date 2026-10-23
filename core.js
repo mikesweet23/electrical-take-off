@@ -15,7 +15,7 @@
   // ------------------------------------------------------------------
   function defaultSettings() {
     return {
-      earthing: 'TN-S', ze: 0.8, zdbDefault: 0.35, pfcDefault: 10, ambient: 30,
+      earthing: 'TN-S', ze: 0.8, zdbDefault: 0.2, pfcDefault: 10, ambient: 30,
       vdLighting: 3, vdOther: 5, vdStart: 10, vdControl: 5, maxFinalA: 32, minPower: 1.5, minControl: 0.5,
       spare: 25, spaceTrunking: 45, spaceConduit: 40,
       termAllow: 0.5, wasteCable: 5, wasteContain: 5,
@@ -26,7 +26,8 @@
       spacing: Object.assign({}, E.SUPPORT_SPACING),
       defMount: 'droprod', defFinish: 'hdg', defType: 'tray', defDuty: 'medium',
       freeMethod: 'C', autoRoute: true, autoHopM: 15, trayBendR: 150, ortho: true, stackScale: 1,
-      isoEnclosure: 'poly', isoIP: 'IP66', stainlessOutdoor: false, calcRev: 2
+      isoEnclosure: 'poly', isoIP: 'IP66', stainlessOutdoor: false, calcRev: 3,
+      segMethod: 'divider', segDividerMm: 10, segGapMm: 200
     };
   }
   function newProject() {
@@ -49,7 +50,9 @@
     // calcRev 2: DOL motors default to Type C (was D). A file from before
     // carries 'D' as the old default, not as anyone's choice.
     if (!(had.calcRev >= 2) && had.motorCurve === 'D') P.settings.motorCurve = 'C';
-    P.settings.calcRev = 2;
+    // calcRev 3: the default Zdb is 0.2 Ω (was 0.35 Ω)
+    if (!(had.calcRev >= 3) && Number(had.zdbDefault) === 0.35) P.settings.zdbDefault = 0.2;
+    P.settings.calcRev = 3;
     P.settings.spacing = Object.assign({}, E.SUPPORT_SPACING, (P.settings.spacing || {}));
     let max = 0;
     const seen = (id) => { const m = /^[a-z]+([0-9a-z]+)$/.exec(String(id || '')); if (m) max = Math.max(max, parseInt(m[1], 36) || 0); };
@@ -480,13 +483,15 @@
           if (!sp.edge || seen.has(sp.edge.id)) return;
           seen.add(sp.edge.id);
           if (!A.occ.has(sp.edge.id)) A.occ.set(sp.edge.id, []);
-          A.occ.get(sp.edge.id).push({ cid: c.id, role: lp.role, power: c.kind !== 'control', t0: sp.t0 != null ? sp.t0 : 0, t1: sp.t1 != null ? sp.t1 : 1 });
+          A.occ.get(sp.edge.id).push({ cid: c.id, role: lp.role, power: c.kind !== 'control', band: bandOf(c), t0: sp.t0 != null ? sp.t0 : 0, t1: sp.t1 != null ? sp.t1 : 1 });
         });
       });
     });
-    const powerCount = (eid) => {
-      const set = new Set((A.occ.get(eid) || []).filter(o => o.power).map(o => o.cid));
-      return set.size;
+    // Grouping is counted where the cables actually lie together: the most
+    // power circuits side by side at any point of the stretch this cable rides.
+    const powerCount = (eid, t0, t1) => {
+      const list = (A.occ.get(eid) || []).filter(o => o.power && o.t1 >= (t0 || 0) - 1e-9 && o.t0 <= (t1 == null ? 1 : t1) + 1e-9);
+      return maxCover(list, t0 || 0, t1 == null ? 1 : t1, () => 1, true);
     };
 
     function edgeContainment(e) {
@@ -511,7 +516,7 @@
           const cond = {
             method: ct.route && ct.route.inWall && m.method === 'B' ? 'A' : m.method,
             arr: ct.layout === 'spaced' && m.arr !== 'enclosed' ? 'spaced' : m.arr,
-            n: c.kind === 'control' ? 1 : powerCount(sp.edge.id),
+            n: c.kind === 'control' ? 1 : powerCount(sp.edge.id, sp.t0, sp.t1),
             ambient: ct.amb != null && ct.amb !== '' ? Number(ct.amb) : s.ambient,
             where: ct.route ? (ct.route.name || ct.route.id) : 'Riser ' + sp.edge.riser
           };
@@ -642,28 +647,53 @@
     const edgeCables = new Map();
     A.occ.forEach((list, eid) => {
       const ods = [];
-      list.forEach(o => odOf(o.cid, o.role).forEach(d => ods.push({ od: d, cid: o.cid, role: o.role, t0: o.t0, t1: o.t1 })));
+      list.forEach(o => odOf(o.cid, o.role).forEach(d => ods.push({ od: d, cid: o.cid, role: o.role, band: o.band, t0: o.t0, t1: o.t1 })));
       edgeCables.set(eid, ods);
     });
     A.edgeCables = edgeCables;
 
-    function sizeContainment(kind, layout, ods, override) {
+    // The fullest point of a piece of containment: cables that ride only part
+    // of it are counted only where they are.
+    function fullestPoint(list, need) {
+      const ts = [...new Set(list.flatMap(x => [x.t0, x.t1]).concat([0, 1]))].sort((p, q) => p - q);
+      let best = [], bv = -1;
+      for (let i = 0; i < ts.length; i++) {
+        const m = i < ts.length - 1 ? (ts[i] + ts[i + 1]) / 2 : ts[i];
+        const here = list.filter(x => x.t0 <= m + 1e-9 && x.t1 >= m - 1e-9);
+        const v = need(here);
+        if (v > bv) { bv = v; best = here; }
+      }
+      return best;
+    }
+
+    // Band I (ELV control, data, signal) and Band II (LV power) on the same
+    // containment must be segregated (528.1, BS EN 50174-2): a divider in
+    // tray, ladder and basket, a compartment in trunking, never one conduit.
+    function sizeContainment(kind, layout, cabs, override) {
       const C = E.CONTAINMENT[kind] || E.CONTAINMENT.tray;
-      const out = { kind, cables: ods.length, sumOd: ods.reduce((a, d) => a + d, 0) };
+      const ods = cabs.map(x => x.od);
+      const odII = cabs.filter(x => x.band !== 'I').map(x => x.od);
+      const odI = cabs.filter(x => x.band === 'I').map(x => x.od);
+      const mixed = odII.length > 0 && odI.length > 0;
+      const out = { kind, cables: ods.length, sumOd: ods.reduce((a, d) => a + d, 0), mixed, seg: mixed ? (s.segMethod || 'divider') : null };
+      const spaced = layout === 'spaced';
       if (C.fill === 'width') {
-        out.reqMm = E.widthRequired(ods, s.spare, layout === 'spaced');
+        const sepMm = mixed ? (out.seg === 'gap' ? Number(s.segGapMm) || 200 : out.seg === 'divider' ? Number(s.segDividerMm) || 10 : 0) : 0;
+        out.sepMm = sepMm;
+        const req = (list, spare) => mixed ? E.widthRequired(odII, spare, spaced) + E.widthRequired(odI, spare, false) + sepMm : E.widthRequired(list, spare, spaced);
+        out.reqMm = req(ods, s.spare);
         out.auto = E.pickWidth(kind, out.reqMm);
         out.width = override ? Number(override) : out.auto;
         out.size = out.width ? out.width + ' mm' : 'over ' + C.widths[C.widths.length - 1] + ' mm';
         out.fillPct = out.width ? out.sumOd / out.width * 100 : null;
-        out.ok = !!out.width && out.width >= (layout === 'spaced' ? E.widthRequired(ods, 0, true) : out.sumOd);
+        out.ok = !!out.width && out.width >= req(ods, 0) - 1e-9;
         out.okSpare = !!out.width && out.width >= out.reqMm - 1e-9;
       } else if (C.fill === 'area') {
         const t = E.pickTrunking(kind, ods, s.spaceTrunking, s.spare);
         out.auto = t.size;
         const sz = override ? String(override).split('x').map(Number) : t.size;
         out.width = sz ? sz[0] : null; out.height = sz ? sz[1] : null;
-        out.size = sz ? sz[0] + '×' + sz[1] + ' mm' : 'oversize';
+        out.size = sz ? sz[0] + '×' + sz[1] + ' mm' + (mixed ? ' 2-compartment' : '') : 'oversize';
         out.fillPct = sz ? E.areaOf(ods) / (sz[0] * sz[1]) * 100 : null;
         out.ok = !!sz && out.fillPct <= t.sf * 100 + 1e-9;
         out.okSpare = out.ok;
@@ -674,23 +704,36 @@
         out.width = override ? Number(override) : t.bore;
         out.size = out.width ? out.width + ' mm' : 'oversize';
         out.fillPct = out.width ? E.areaOf(ods) / (Math.PI * out.width * out.width / 4) * 100 : null;
-        out.ok = !!out.width && out.fillPct <= t.sf * 100 + 1e-9;
+        out.ok = !!out.width && out.fillPct <= t.sf * 100 + 1e-9 && !mixed;
         out.okSpare = out.ok;
       } else {
         out.width = Math.max(20, out.sumOd); out.size = '—'; out.fillPct = null; out.ok = true; out.okSpare = true;
       }
+      // what the plan and 3D draw: the chosen width, or what is needed if nothing fits
+      out.drawMm = out.width || out.reqMm || out.sumOd || 50;
       return out;
     }
+    const widthNeed = (layout) => (here) => {
+      const II = here.filter(x => x.band !== 'I'), I = here.filter(x => x.band === 'I');
+      const sep = II.length && I.length ? (s.segMethod === 'gap' ? Number(s.segGapMm) || 200 : s.segMethod === 'divider' ? Number(s.segDividerMm) || 10 : 0) : 0;
+      return E.widthRequired(II.map(x => x.od), 0, layout === 'spaced') + E.widthRequired(I.map(x => x.od), 0, false) + sep;
+    };
 
     P.routes.forEach(r => {
       let all = [];
       let worst = [];
+      let wv = -1;
+      const need = widthNeed(r.layout);
       G.edges.filter(e => e.rid === r.id).forEach(e => {
-        const ods = (edgeCables.get(e.id) || []).map(x => x.od);
-        if (ods.reduce((a, d) => a + d, 0) > worst.reduce((a, d) => a + d, 0)) worst = ods;
-        all = all.concat(ods);
+        const list = edgeCables.get(e.id) || [];
+        const here = fullestPoint(list, need);
+        const v = need(here);
+        if (v > wv) { wv = v; worst = here; }
+        all = all.concat(list.map(x => x.od));
       });
       const res = sizeContainment(r.type, r.layout, worst, r.width);
+      res.mixedAnywhere = G.edges.some(e => e.rid === r.id && (edgeCables.get(e.id) || []).some(x => x.band === 'I') && (edgeCables.get(e.id) || []).some(x => x.band !== 'I'));
+      if (res.mixedAnywhere && !res.mixed) { res.mixed = true; res.seg = s.segMethod || 'divider'; }
       // large cables will not take a standard tray bend (minimum internal
       // radius about 8 × D for armoured cable): ladder with large-radius bends
       res.maxOd = all.length ? Math.max(...all) : 0;
@@ -699,15 +742,16 @@
       res.circuits = new Set();
       G.edges.filter(e => e.rid === r.id).forEach(e => (A.occ.get(e.id) || []).forEach(o => res.circuits.add(o.cid)));
       res.nCircuits = res.circuits.size;
+      res.maxGrouped = Math.max(0, ...G.edges.filter(e => e.rid === r.id).map(e => powerCount(e.id, 0, 1)));
       A.routes.set(r.id, res);
     });
     // risers size the same way, per riser name
     A.risers = new Map();
     G.edges.filter(e => e.riser).forEach(e => {
       const n = ix.node.get(e.riserNode);
-      const ods = (edgeCables.get(e.id) || []).map(x => x.od);
+      const list = edgeCables.get(e.id) || [];
       const prev = A.risers.get(e.riser);
-      const res = sizeContainment(n.riserType || 'tray', 'touching', ods, n.riserWidth);
+      const res = sizeContainment(n.riserType || 'tray', 'touching', list, n.riserWidth);
       res.len = (prev ? prev.len : 0) + e.len;
       if (!prev || (res.width || 0) >= (prev.width || 0)) A.risers.set(e.riser, Object.assign(res, { node: n }));
       else prev.len = res.len;
@@ -727,9 +771,71 @@
       const r = ix.route.get(rid);
       if (!res.ok) A.issues.push({ sev: 'fail', route: rid, text: (r.name || rid) + ': ' + E.CONTAINMENT[r.type].label + ' over-full (' + (res.fillPct ? res.fillPct.toFixed(0) + ' %' : 'no size fits') + ')' });
       else if (!res.okSpare) A.issues.push({ sev: 'warn', route: rid, text: (r.name || rid) + ': less than the ' + s.spare + ' % spare allowance' });
+      if (res.mixed && (r.type === 'conduit' || r.type === 'pvcconduit')) A.issues.push({ sev: 'fail', route: rid, text: (r.name || rid) + ': power and control / data cables in the same conduit — segregate them (528.1)' });
+      else if (res.mixed && res.seg === 'separate') A.issues.push({ sev: 'warn', route: rid, text: (r.name || rid) + ': power and control / data share this run — move the Band I cables to their own containment (528.1)' });
       if (res.bendWarn) A.issues.push({ sev: 'warn', route: rid, text: (r.name || rid) + ': carries a ' + res.maxOd.toFixed(1) + ' mm cable needing about ' + Math.round(res.bendR) + ' mm bend radius — use ladder with large-radius bends' });
     });
     return A;
+  }
+
+  // Band I: extra-low voltage control, data and signal. Band II: LV power.
+  function bandOf(c) {
+    if (c.kind !== 'control') return 'II';
+    const v = Number(c.ctrl && c.ctrl.volts) || 24;
+    return (c.ctrl && c.ctrl.signal) || v <= 50 ? 'I' : 'II';
+  }
+  // the most items lying together anywhere in [t0, t1]
+  function maxCover(list, t0, t1, w, distinct) {
+    const ts = [...new Set(list.flatMap(x => [x.t0, x.t1]).concat([t0, t1]))].filter(t => t >= t0 - 1e-9 && t <= t1 + 1e-9).sort((p, q) => p - q);
+    let best = 0;
+    for (let i = 0; i < ts.length; i++) {
+      const m = i < ts.length - 1 ? (ts[i] + ts[i + 1]) / 2 : ts[i];
+      const here = list.filter(x => x.t0 <= m + 1e-9 && x.t1 >= m - 1e-9);
+      const v = distinct ? new Set(here.map(x => x.cid)).size : here.reduce((a, x) => a + w(x), 0);
+      if (v > best) best = v;
+    }
+    return Math.max(best, 1);
+  }
+
+  // Where each cable lies across a piece of containment, in mm from the
+  // centreline (positive to the left of the run's direction). The plan and the
+  // 3D both draw from this, so they always agree with each other and with the
+  // width the take-off orders. Band II packs from one side, Band I from the
+  // other with the divider (or gap) between; spaced cables keep 2 × D apart.
+  function edgeLayout(P, A, eid) {
+    const e = A.G.edgeById.get(eid);
+    const r = e && e.rid ? A.ix.route.get(e.rid) : null;
+    const res = r ? A.routes.get(r.id) : (e && e.riser ? A.risers.get(e.riser) : null);
+    const list = (A.edgeCables.get(eid) || []).slice();
+    const order = new Map(P.circuits.map((c, i) => [c.id, i]));
+    list.sort((a, b) => (order.get(a.cid) - order.get(b.cid)) || (a.role < b.role ? -1 : 1));
+    const W = res ? res.drawMm : 100;
+    const spaced = r && r.layout === 'spaced';
+    const lane = (x) => x.od + (spaced && x.band !== 'I' ? 2 * x.od : 0);
+    const II = list.filter(x => x.band !== 'I'), I = list.filter(x => x.band === 'I');
+    const items = [];
+    let divider = null;
+    const packFrom = (arr, start, dir) => {
+      let pos = start;
+      arr.forEach(x => { const c0 = pos + dir * x.od / 2; items.push(Object.assign({}, x, { off: c0 })); pos += dir * lane(x); });
+      return pos;
+    };
+    // Offsets are positive to the right of the trace direction on the plan.
+    // Power keeps to the left edge, or to the wall for a tray on edge ("left
+    // of the trace" is side 1).
+    const ps = r && r.orient === 'wall' && r.side === -1 ? 1 : -1;
+    if (II.length && I.length) {
+      const endII = packFrom(II, ps * W / 2, -ps);
+      packFrom(I, -ps * W / 2, ps);
+      const sep = res && res.sepMm ? res.sepMm : 10;
+      divider = endII - ps * sep / 2;
+    } else if (r && r.orient === 'wall') {
+      packFrom(list, ps * W / 2, -ps);
+    } else {
+      const total = list.reduce((a, x) => a + lane(x), 0) - (spaced && list.length ? 2 * list[list.length - 1].od : 0);
+      packFrom(list, -total / 2, 1);
+    }
+    return { items, divider, W };
   }
 
   function loadInput(L) {
@@ -850,6 +956,11 @@
       const sizeLabel = res.size || '—';
       if (r.type !== 'cleats') {
         addTo(contain, [r.type, sizeLabel, duty, finish].join('|'), lens.total, { desc: C.label, size: sizeLabel, duty: dutyLabel, finish: E.FINISHES[finish] || finish, stockM: C.stockM });
+      }
+      // segregation: a divider the length of a run carrying power and Band I
+      if (res.mixed && (res.seg === 'divider' || C.fill === 'area') && r.type !== 'cleats' && C.fill !== 'conduit') {
+        const what = C.fill === 'area' ? 'Trunking compartment divider' : (r.type === 'ladder' ? 'Ladder divider / separator' : r.type === 'basket' ? 'Basket divider' : 'Tray divider / separator strip');
+        addTo(contain, ['divider', r.type, finish].join('|'), lens.total, { desc: what + ' (Band I / II segregation)', size: '—', duty: '', finish: E.FINISHES[finish] || finish, stockM: C.stockM || 3 });
       }
       const f = fits.get(r.id) || {};
       const names = FITTING_NAMES[r.type] || {};
@@ -998,7 +1109,7 @@
     return { rating, poles: pick.poles, aux: pick.aux, enclosure, ip, fused, duty: pick.duty, text, warn, circuit: c ? c.id : null };
   }
 
-  const api = { defaultSettings, newProject, nid, repair, index, buildGraph, shortestPath, nearestGraphNode, autoRoute, autoPath, taps, legEnds, legPath, ptPos, rootOf, pxPerM, sheetLevel, solve, takeoff, isolatorSpec, routeFittings, routeLengths, deviceFor, legType, loadInput, FITTING_NAMES };
+  const api = { defaultSettings, newProject, nid, repair, index, buildGraph, shortestPath, nearestGraphNode, autoRoute, autoPath, taps, edgeLayout, bandOf, maxCover, legEnds, legPath, ptPos, rootOf, pxPerM, sheetLevel, solve, takeoff, isolatorSpec, routeFittings, routeLengths, deviceFor, legType, loadInput, FITTING_NAMES };
   root.CableCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
